@@ -136,38 +136,47 @@ def calc_bollinger_band(closes, period=20):
     std = s.rolling(period).std()
     return (sma + 2*std), sma, (sma - 2*std)
 
-def render_domestic_chart(code, name, closes, APP_KEY, APP_SECRET, token, n=60):
+def render_domestic_chart(code, name, closes, APP_KEY, APP_SECRET, token, n=60, chart_key=None):
     """국내 종목 RSI+MACD+볼린저밴드 4단 차트"""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    # 날짜 가져오기
-    end   = datetime.today().strftime("%Y%m%d")
-    start = (datetime.today()-timedelta(days=300)).strftime("%Y%m%d")
+    n = min(n, len(closes))
+    c_n = closes[-n:]
+
+    # 지표 계산 먼저 (날짜 없어도 계산 가능)
+    s = pd.Series(closes)
+    delta = s.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+    rsi = (100 - 100/(1 + gain/loss.replace(0, float('nan')))).fillna(50)
+    ema12 = s.ewm(span=12, adjust=False).mean()
+    ema26 = s.ewm(span=26, adjust=False).mean()
+    macd = ema12-ema26; sig = macd.ewm(span=9, adjust=False).mean(); hist_m = macd-sig
+    bb_up, bb_mid, bb_low = calc_bollinger_band(closes)
+
+    # 날짜 가져오기 (실패해도 인덱스로 대체)
     dates_raw = []
     try:
-        r2 = requests.get(
-            f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-            headers=kis_headers(APP_KEY,APP_SECRET,token,"FHKST03010100"),
-            params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":code,
-                    "FID_INPUT_DATE_1":start,"FID_INPUT_DATE_2":end,
-                    "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},timeout=10)
-        items2 = r2.json().get("output2",[])
-        dates_raw = [d.get("stck_bsop_date","") for d in items2 if d.get("stck_clpr")]
-        dates_raw.reverse()
+        end   = datetime.today().strftime("%Y%m%d")
+        start = (datetime.today()-timedelta(days=150)).strftime("%Y%m%d")
+        if token:
+            r2 = requests.get(
+                f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+                headers=kis_headers(APP_KEY,APP_SECRET,token,"FHKST03010100"),
+                params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":code,
+                        "FID_INPUT_DATE_1":start,"FID_INPUT_DATE_2":end,
+                        "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},timeout=7)
+            items2 = r2.json().get("output2",[])
+            dates_raw = [d.get("stck_bsop_date","") for d in items2 if d.get("stck_clpr")]
+            dates_raw.reverse()
     except: pass
 
-    n   = min(n, len(closes))
-    c_n = closes[-n:]
-    d_n = pd.to_datetime(dates_raw[-n:]) if len(dates_raw)>=n else list(range(n))
-
-    # 지표 계산
-    s = pd.Series(closes)
-    delta = s.diff(); gain = delta.clip(lower=0); loss = (-delta).clip(upper=0).abs()
-    rsi = (100 - 100/(1 + gain.rolling(14).mean()/loss.rolling(14).mean().replace(0,float('nan')))).fillna(50)
-    ema12 = s.ewm(span=12).mean(); ema26 = s.ewm(span=26).mean()
-    macd = ema12-ema26; sig = macd.ewm(span=9).mean(); hist_m = macd-sig
-    bb_up, bb_mid, bb_low = calc_bollinger_band(closes)
+    # 날짜 없으면 0,1,2... 인덱스 사용
+    if len(dates_raw) >= n:
+        d_n = pd.to_datetime(dates_raw[-n:])
+    else:
+        d_n = list(range(n))
 
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True,
                         row_heights=[0.45,0.2,0.2,0.15],
@@ -191,8 +200,32 @@ def render_domestic_chart(code, name, closes, APP_KEY, APP_SECRET, token, n=60):
     fig.add_trace(go.Scatter(x=d_n,y=macd.values[-n:],line=dict(color="#1565C0",width=1.5),name="MACD"),row=3,col=1)
     fig.add_trace(go.Scatter(x=d_n,y=sig.values[-n:],line=dict(color="#F57F17",width=1.5),name="시그널"),row=3,col=1)
 
-    fig.update_layout(height=560,showlegend=False,paper_bgcolor="white",
-                      plot_bgcolor="#F8F9FA",margin=dict(l=10,r=10,t=30,b=10))
+    # x축 날짜 15일 간격 tickvals 계산
+    if len(dates_raw) >= n and isinstance(d_n[0] if hasattr(d_n,'__getitem__') else 0, str) is False:
+        try:
+            import numpy as np
+            tick_indices = list(range(0, n, 15))
+            tick_vals = [d_n[i] for i in tick_indices if i < len(d_n)]
+            tick_texts = [str(d_n[i])[:10].replace('-','.')[5:] for i in tick_indices if i < len(d_n)]
+            xaxis_cfg = dict(tickvals=tick_vals, ticktext=tick_texts, tickangle=-30,
+                           showspikes=True, spikemode="across", spikesnap="cursor",
+                           spikecolor="#888888", spikethickness=1, spikedash="dot")
+        except:
+            xaxis_cfg = dict(showspikes=True, spikemode="across")
+    else:
+        xaxis_cfg = dict(showspikes=True, spikemode="across")
+
+    fig.update_layout(
+        height=560, showlegend=False,
+        paper_bgcolor="white", plot_bgcolor="#F8F9FA",
+        margin=dict(l=10,r=10,t=30,b=60),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="white", font_size=12, bordercolor="#DDDDDD"),
+        xaxis=dict(**xaxis_cfg),
+        xaxis2=dict(**xaxis_cfg),
+        xaxis3=dict(**xaxis_cfg),
+        xaxis4=dict(**xaxis_cfg),
+    )
 
     # 메트릭
     cur_rsi  = round(float(rsi.values[-1]),1)
@@ -207,43 +240,71 @@ def render_domestic_chart(code, name, closes, APP_KEY, APP_SECRET, token, n=60):
     mc2.metric("MACD", cur_macd, "상승🟢" if cur_macd>cur_sig else "하락🔴")
     mc3.metric("시그널", cur_sig)
     mc4.metric("볼린저 위치", bb_pos)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key or f"chart_{code}")
 
     return rsi, macd, sig, dates_raw
 
 def render_7day_table(closes, volumes, dates_raw, rsi_series, macd_series):
-    """최근 7거래일 추이 표"""
+    """최근 7거래일 추이 표 — 색상 신호 포함"""
     rows_html = ""
     dates_use = dates_raw if dates_raw else [f"D-{abs(i)}" for i in range(-1,-9,-1)]
     for i in range(-1, -8, -1):
         try:
             p = closes[i]; po = closes[i-1]; v = volumes[i] if volumes else 0
             dc = (p-po)/po*100
-            dc_color = "#E24B4A" if dc>0 else "#1565C0"
+            chg_color = "#E24B4A" if dc>0 else "#1565C0"
+
             r_val = round(float(rsi_series.iloc[i]), 1)
             m_val = round(float(macd_series.iloc[i]), 2)
-            date_str = dates_use[i] if i < len(dates_use) else ""
+
+            # RSI 신호 — 원 크게
+            if r_val >= 70:
+                rsi_signal = f'<span style="color:#E24B4A;font-weight:700">{r_val}</span>&nbsp;<span style="color:#E24B4A;font-size:1.4rem;line-height:1">●</span>'
+            elif r_val <= 30:
+                rsi_signal = f'<span style="color:#2E7D32;font-weight:700">{r_val}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
+            else:
+                rsi_signal = f'<span style="color:#424242">{r_val}</span>'
+
+            # MACD 신호 — 원 크게
+            if m_val > 0:
+                macd_signal = f'<span style="color:#E24B4A;font-weight:700">{m_val:,}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
+            else:
+                macd_signal = f'<span style="color:#1565C0;font-weight:700">{m_val:,}</span>&nbsp;<span style="color:#E24B4A;font-size:1.4rem;line-height:1">●</span>'
+
+            # 거래량 신호 (평균 대비)
+            avg_vol = sum(volumes[-20:]) / min(len(volumes), 20) if volumes else 0
+            if avg_vol > 0 and v >= avg_vol * 1.5:
+                vol_signal = f'<span style="font-weight:600">{int(v):,}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
+            else:
+                vol_signal = f'{int(v):,}'
+
+            date_str = dates_use[i] if abs(i) <= len(dates_use) else ""
             if isinstance(date_str, str) and len(date_str)==8:
-                date_str = f"{date_str[:4]}.{date_str[4:6]}.{date_str[6:]}"
+                date_str = f"{date_str[4:6]}.{date_str[6:]}"
+
             rows_html += (
-                f'<tr><td style="padding:8px;border-bottom:1px solid #EEE">{date_str}</td>'
-                f'<td style="padding:8px;border-bottom:1px solid #EEE;text-align:right">{int(p):,}원</td>'
-                f'<td style="padding:8px;border-bottom:1px solid #EEE;color:{dc_color};text-align:right">{dc:+.2f}%</td>'
-                f'<td style="padding:8px;border-bottom:1px solid #EEE;text-align:right">{int(v/1000):,}K</td>'
-                f'<td style="padding:8px;border-bottom:1px solid #EEE;text-align:right">{r_val}</td>'
-                f'<td style="padding:8px;border-bottom:1px solid #EEE;text-align:right">{m_val}</td></tr>'
+                f'<tr style="border-bottom:1px solid #F0F0F0;font-size:1rem">'
+                f'<td style="padding:13px 10px;text-align:center;color:#616161">{date_str}</td>'
+                f'<td style="padding:13px 10px;text-align:center;font-weight:600">{int(p):,}원</td>'
+                f'<td style="padding:13px 10px;text-align:center;color:{chg_color};font-weight:700">{int(p-po):+,}원</td>'
+                f'<td style="padding:13px 10px;text-align:center;color:{chg_color};font-weight:700">{dc:+.2f}%</td>'
+                f'<td style="padding:13px 10px;text-align:center">{vol_signal}</td>'
+                f'<td style="padding:13px 10px;text-align:center">{rsi_signal}</td>'
+                f'<td style="padding:13px 10px;text-align:center">{macd_signal}</td>'
+                f'</tr>'
             )
         except: break
 
     st.markdown(
-        '<table style="width:100%;border-collapse:collapse;font-size:.85rem">'
-        '<tr style="background:#F8F9FA;font-weight:700">'
-        '<th style="padding:8px;border-bottom:2px solid #DDD">날짜</th>'
-        '<th style="padding:8px;border-bottom:2px solid #DDD;text-align:right">종가</th>'
-        '<th style="padding:8px;border-bottom:2px solid #DDD;text-align:right">등락</th>'
-        '<th style="padding:8px;border-bottom:2px solid #DDD;text-align:right">거래량</th>'
-        '<th style="padding:8px;border-bottom:2px solid #DDD;text-align:right">RSI</th>'
-        '<th style="padding:8px;border-bottom:2px solid #DDD;text-align:right">MACD</th>'
+        '<table style="width:100%;border-collapse:collapse;font-size:1rem;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.06)">'
+        '<tr style="background:#F8F9FA;font-weight:700;color:#424242;font-size:1rem">'
+        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">날짜</th>'
+        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">종가</th>'
+        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">변동</th>'
+        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">등락률</th>'
+        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">거래량<br><span style="font-size:.75rem;color:#9E9E9E;font-weight:400">평균1.5배↑🟢</span></th>'
+        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">RSI<br><span style="font-size:.75rem;color:#9E9E9E;font-weight:400">30↓매수🟢 70↑매도🔴</span></th>'
+        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">MACD<br><span style="font-size:.75rem;color:#9E9E9E;font-weight:400">양수🟢 음수🔴</span></th>'
         '</tr>' + rows_html + '</table>',
         unsafe_allow_html=True
     )
@@ -255,14 +316,14 @@ def kis_headers(app_key, app_secret, token, tr_id):
         "tr_id":tr_id,"content-type":"application/json; charset=utf-8",
     }
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_price_info(code, app_key, app_secret, token):
     try:
         res = requests.get(
             f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
             headers=kis_headers(app_key,app_secret,token,"FHKST01010100"),
             params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":code},
-            timeout=10
+            timeout=5  # 빠른 응답
         )
         d=res.json().get("output",{})
         return {"current":float(d.get("stck_prpr",0) or 0),"per":float(d.get("per",0) or 0),
@@ -271,21 +332,21 @@ def get_price_info(code, app_key, app_secret, token):
     except:
         return {}
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_ohlcv_info(code, app_key, app_secret, token):
     try:
         end=(datetime.today()).strftime("%Y%m%d")
-        start=(datetime.today()-timedelta(days=400)).strftime("%Y%m%d")
+        start=(datetime.today()-timedelta(days=300)).strftime("%Y%m%d")
         res=requests.get(
             f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
             headers=kis_headers(app_key,app_secret,token,"FHKST03010100"),
             params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":code,
                     "FID_INPUT_DATE_1":start,"FID_INPUT_DATE_2":end,
                     "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},
-            timeout=10
+            timeout=7
         )
         items=res.json().get("output2",[])
-        if not items or len(items)<30: return {}
+        if not items or len(items)<25: return {}
         closes=[float(d.get("stck_clpr",0) or 0) for d in items if d.get("stck_clpr")]
         vols=[float(d.get("acml_vol",0) or 0) for d in items if d.get("acml_vol")]
         if not closes: return {}
@@ -296,8 +357,7 @@ def get_ohlcv_info(code, app_key, app_secret, token):
         v7=sum(vols[-7:])/7 if len(vols)>=7 else 0
         v90=sum(vols[-90:])/90 if len(vols)>=90 else 1
         vi=round(v7/v90,2) if v90>0 else 1.0
-        c252=closes[-252:] if len(closes)>=252 else closes
-        h52=max(c252); l52=min(c252)
+        h52=max(closes); l52=min(closes)
         neg=round((cur-l52)/(h52-l52)*100,1) if h52!=l52 else 50
         exp=round((h52-cur)/cur*100,1) if cur>0 else 0
         ret30=round((cur/closes[-30]-1)*100,1) if len(closes)>=30 else 0
@@ -388,7 +448,9 @@ try:
     APP_SECRET = st.secrets["KIS_APP_SECRET"]
     KEYS_OK    = True
 except:
-    KEYS_OK = False
+    APP_KEY    = ""
+    APP_SECRET = ""
+    KEYS_OK    = False
 
 # ── 헤더 ────────────────────────────────────────────────
 today_str = datetime.today().strftime("%Y년 %m월 %d일")
@@ -405,7 +467,11 @@ if not KEYS_OK:
     st.stop()
 
 # ── 탭 ──────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📊 LB 스크리너", "🗂 테마 탐색기", "🔍 종목 검색", "🌏 해외 종목"])
+tab_theme, tab_search, tab_foreign, tab_lb = st.tabs(["🗂 테마 탐색기", "🔍 종목 검색", "🌏 해외 종목", "📊 LB 스크리너"])
+tab1 = tab_lb
+tab2 = tab_theme
+tab3 = tab_search
+tab4 = tab_foreign
 
 # ════════════════════════════════════════════════════════
 # 탭1: LB 스크리너
@@ -468,11 +534,7 @@ with tab1:
     run = st.button("▶ 스크리닝 실행", use_container_width=True, key="run_btn")
 
     if "results"  not in st.session_state: st.session_state.results  = None
-    if "auto_run" not in st.session_state: st.session_state.auto_run = True
     if "token"    not in st.session_state: st.session_state.token    = ""
-    if st.session_state.auto_run:
-        st.session_state.auto_run = False
-        run = True
 
     if run:
         with st.spinner("KIS API 토큰 발급 중..."):
@@ -495,13 +557,13 @@ with tab1:
             prog.progress(pct)
             pi=get_price_info(code,APP_KEY,APP_SECRET,token)
             if not pi or pi.get("per",0)<=0 or pi.get("eps",0)<=0:
-                time.sleep(0.05); continue
+                continue
             name=get_stock_name(code, pi.get("name",""))
             per=pi.get("per",0); pbr=pi.get("pbr",0)
             eps=pi.get("eps",0); current=pi.get("current",0)
             stat.markdown(f"🔍 **{name}** 분석 중... `{pct}%`")
             ov=get_ohlcv_info(code,APP_KEY,APP_SECRET,token)
-            if not ov: time.sleep(0.05); continue
+            if not ov: continue
 
             # EPS 성장률 — 기대수익률 + 소외지수 복합 근사
             exp_ret = ov.get("exp_ret", 0)
@@ -626,7 +688,9 @@ with tab1:
                 )
 
             results.append(rec)
-            time.sleep(0.05)
+            # ── 실시간으로 발견 종목 즉시 표시 ──
+            stat.markdown(f"🔍 `{pct}%` 분석 중... ✅ **{len(results)}개 발견** — 최근: {name}")
+
         prog.empty(); stat.empty()
         if not results:
             st.warning("조건을 만족하는 종목이 없습니다. 사이드바에서 PEG 상한이나 이격도 상한을 높여보세요.")
@@ -694,12 +758,13 @@ with tab1:
             st.markdown(card_html, unsafe_allow_html=True)
 
             with st.expander(f"📊 {r['name']} — RSI · MACD 차트"):
-                ov=get_ohlcv_info(r["code"],APP_KEY,APP_SECRET,token)
+                ov=get_ohlcv_info(r["code"],APP_KEY,APP_SECRET,st.session_state.get("token",""))
                 if ov and ov.get("closes"):
                     closes=ov["closes"]
                     if len(closes)>=26:
                         rsi_s, macd_s, sig_s, dates_raw2 = render_domestic_chart(
-                            r["code"], r["name"], closes, APP_KEY, APP_SECRET, token)
+                            r["code"], r["name"], closes, APP_KEY, APP_SECRET,
+                            st.session_state.get("token",""), chart_key=f"lb_{r['code']}")
                         st.markdown("**📋 최근 7거래일 추이**")
                         # 거래량 가져오기
                         try:
@@ -929,12 +994,13 @@ with tab2:
 
             # 클릭하면 차트+7일표+뉴스 펼치기
             with st.expander(f"📊 {r['name']} 상세 분석 보기"):
-                t_ov = get_ohlcv_info(r["code"], APP_KEY, APP_SECRET, st.session_state.get("token",""))
+                t_token = st.session_state.get("token","")
+                t_ov = get_ohlcv_info(r["code"], APP_KEY, APP_SECRET, t_token)
                 if t_ov and t_ov.get("closes") and len(t_ov["closes"]) >= 26:
                     t_closes = t_ov["closes"]
                     rsi_t, macd_t, sig_t, dates_t = render_domestic_chart(
-                        r["code"], r["name"], t_closes, APP_KEY, APP_SECRET,
-                        st.session_state.get("token",""))
+                        r["code"], r["name"], t_closes, APP_KEY, APP_SECRET, t_token,
+                        chart_key=f"theme_{r['code']}")
                     st.markdown("**📋 최근 7거래일 추이**")
                     try:
                         end_t=datetime.today().strftime("%Y%m%d")
@@ -1092,19 +1158,32 @@ with tab3:
             + theme_div +
             '</div>'
             '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;min-width:360px">'
-            '<div style="text-align:center;background:#F0F4FF;border-radius:10px;padding:10px">'
-            '<div style="font-size:1.1rem;font-weight:700;color:#2E7D32">PEG ' + str(peg) + '</div>'
-            '<div style="font-size:.7rem;color:#9E9E9E">린치 지표</div></div>'
-            '<div style="text-align:center;background:#F0F4FF;border-radius:10px;padding:10px">'
-            '<div style="font-size:1.1rem;font-weight:700;color:#6A1B9A">이격 ' + str(gap_now) + '%</div>'
-            '<div style="font-size:.7rem;color:#9E9E9E">BNF 타이밍</div></div>'
-            '<div style="text-align:center;background:#F0F4FF;border-radius:10px;padding:10px">'
-            '<div style="font-size:1.1rem;font-weight:700;color:#F57F17">PBR ' + str(pbr) + '</div>'
-            '<div style="font-size:.7rem;color:#9E9E9E">자산 대비</div></div>'
-            '<div style="text-align:center;background:#F0F4FF;border-radius:10px;padding:10px">'
-            '<div style="font-size:1.3rem;font-weight:900;color:' + lb_color + '">' + str(lb) + '</div>'
-            '<div style="font-size:.7rem;color:#9E9E9E">LB 스코어</div></div>'
-            '</div></div></div>',
+
+            # PEG — 1.0 이하 초록, 1.5 이하 주황, 그 외 빨강
+            + '<div style="text-align:center;background:#F0F4FF;border-radius:10px;padding:10px">'
+            + '<div style="font-size:1.1rem;font-weight:700;color:' + ("#2E7D32" if peg<=1.0 else "#F57F17" if peg<=1.5 else "#E24B4A") + '">PEG ' + str(peg) + '</div>'
+            + '<div style="font-size:.72rem;color:#9E9E9E;margin-top:2px">린치 지표</div>'
+            + '<div style="font-size:.7rem;margin-top:3px;color:' + ("#2E7D32" if peg<=1.0 else "#F57F17" if peg<=1.5 else "#E24B4A") + '">' + ("🟢 저평가" if peg<=1.0 else "🟡 적정" if peg<=1.5 else "🔴 고평가") + '</div></div>'
+
+            # 이격도 — 100% 미만 초록, 103% 이하 주황, 초과 빨강
+            + '<div style="text-align:center;background:#F0F4FF;border-radius:10px;padding:10px">'
+            + '<div style="font-size:1.1rem;font-weight:700;color:' + ("#2E7D32" if gap_now<100 else "#F57F17" if gap_now<=103 else "#E24B4A") + '">이격 ' + str(gap_now) + '%</div>'
+            + '<div style="font-size:.72rem;color:#9E9E9E;margin-top:2px">BNF 타이밍</div>'
+            + '<div style="font-size:.7rem;margin-top:3px;color:' + ("#2E7D32" if gap_now<100 else "#F57F17" if gap_now<=103 else "#E24B4A") + '">' + ("🟢 눌림목" if gap_now<100 else "🟡 이평근처" if gap_now<=103 else "🔴 과열") + '</div></div>'
+
+            # PBR — 1.0 미만 초록, 2.0 이하 주황, 초과 빨강
+            + '<div style="text-align:center;background:#F0F4FF;border-radius:10px;padding:10px">'
+            + '<div style="font-size:1.1rem;font-weight:700;color:' + ("#2E7D32" if 0<pbr<1.0 else "#F57F17" if pbr<=2.0 else "#E24B4A") + '">PBR ' + str(pbr) + '</div>'
+            + '<div style="font-size:.72rem;color:#9E9E9E;margin-top:2px">자산 대비</div>'
+            + '<div style="font-size:.7rem;margin-top:3px;color:' + ("#2E7D32" if 0<pbr<1.0 else "#F57F17" if pbr<=2.0 else "#9E9E9E") + '">' + ("🟢 자산이하" if 0<pbr<1.0 else "🟡 적정" if pbr<=2.0 else "–") + '</div></div>'
+
+            # LB스코어 — 70↑ 초록, 50↑ 파랑, 30↑ 주황, 미만 회색
+            + '<div style="text-align:center;background:#F0F4FF;border-radius:10px;padding:10px">'
+            + '<div style="font-size:1.3rem;font-weight:900;color:' + lb_color + '">' + str(lb) + '</div>'
+            + '<div style="font-size:.72rem;color:#9E9E9E;margin-top:2px">LB 스코어</div>'
+            + '<div style="font-size:.7rem;margin-top:3px;color:' + lb_color + '">' + ("🟢 최우선" if lb>=70 else "🔵 관심" if lb>=50 else "🟡 참고" if lb>=30 else "⬜ 미달") + '</div></div>'
+
+            + '</div></div></div>',
             unsafe_allow_html=True
         )
 
@@ -1161,19 +1240,21 @@ with tab3:
         # ── RSI/MACD/볼린저밴드 차트 ───────────────────
         st.markdown("**📊 주가 · RSI · MACD · 볼린저밴드 차트**")
         closes = ov.get("closes", [])
+        token3 = st.session_state.get("token", "")
         if closes and len(closes) >= 26:
             rsi_s3, macd_s3, sig_s3, dates_raw3 = render_domestic_chart(
-                selected_code, name, closes, APP_KEY, APP_SECRET, token)
+                selected_code, name, closes, APP_KEY, APP_SECRET, token3,
+                chart_key=f"search_{selected_code}")
             st.markdown("**📋 최근 7거래일 추이**")
             try:
                 end3=datetime.today().strftime("%Y%m%d")
-                start3=(datetime.today()-timedelta(days=200)).strftime("%Y%m%d")
+                start3=(datetime.today()-timedelta(days=150)).strftime("%Y%m%d")
                 rv3=requests.get(
                     f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-                    headers=kis_headers(APP_KEY,APP_SECRET,token,"FHKST03010100"),
+                    headers=kis_headers(APP_KEY,APP_SECRET,token3,"FHKST03010100"),
                     params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":selected_code,
                             "FID_INPUT_DATE_1":start3,"FID_INPUT_DATE_2":end3,
-                            "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},timeout=10)
+                            "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},timeout=7)
                 vols3=[float(d.get("acml_vol",0) or 0) for d in rv3.json().get("output2",[]) if d.get("stck_clpr")]
                 vols3.reverse()
             except: vols3=[]
@@ -1258,7 +1339,7 @@ with tab4:
         except:
             return 1380.0
 
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=1800, show_spinner=False)
     def get_foreign_data(ticker):
         try:
             stock = yf.Ticker(ticker)
@@ -1274,7 +1355,7 @@ with tab4:
         except:
             return None, None
 
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=1800, show_spinner=False)
     def get_foreign_news(company_name):
         try:
             url = f"https://news.google.com/rss/search?q={urllib.parse.quote(company_name+' stock')}&hl=en&gl=US&ceid=US:en"
@@ -1494,38 +1575,55 @@ padding:16px 24px;margin-bottom:20px;color:white">
 
             fig.update_layout(height=580,showlegend=False,paper_bgcolor="white",
                               plot_bgcolor="#F8F9FA",margin=dict(l=10,r=10,t=30,b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"foreign_{f_ticker}")
 
             # ── 최근 7거래일 표 ──────────────────────
             st.markdown("**📋 최근 7거래일 추이**")
             rows_html = ""
+            avg_vol_f = sum(volumes[-20:]) / min(len(volumes),20) if volumes else 1
             for i in range(-1,-8,-1):
                 try:
-                    p  = closes[i]; po = closes[i-1]
-                    v  = volumes[i]
+                    p  = closes[i]; po = closes[i-1]; v = volumes[i]
                     dc = (p-po)/po*100
-                    dc_color = "#E24B4A" if dc>0 else "#1565C0"
+                    chg_color = "#E24B4A" if dc>0 else "#1565C0"
                     r_val = round(rsi_series.tolist()[i], 1)
                     m_val = round(macd_line.tolist()[i], 3)
+
+                    if r_val >= 70:
+                        rsi_signal = f'<span style="color:#E24B4A;font-weight:700">{r_val}</span> <span style="color:#E24B4A">●</span>'
+                    elif r_val <= 30:
+                        rsi_signal = f'<span style="color:#2E7D32;font-weight:700">{r_val}</span> <span style="color:#2E7D32">●</span>'
+                    else:
+                        rsi_signal = f'<span style="color:#424242">{r_val}</span>'
+
+                    if m_val > 0:
+                        macd_signal = f'<span style="color:#E24B4A;font-weight:700">{m_val}</span> <span style="color:#2E7D32">●</span>'
+                    else:
+                        macd_signal = f'<span style="color:#1565C0;font-weight:700">{m_val}</span> <span style="color:#E24B4A">●</span>'
+
+                    vol_signal = f'<span style="font-weight:600">{int(v):,}</span> <span style="color:#2E7D32">●</span>' if v >= avg_vol_f*1.5 else f'{int(v):,}'
+
                     rows_html += (
-                        f'<tr><td>{dates[i]}</td>'
-                        f'<td>${p:,.2f}</td>'
-                        f'<td style="color:{dc_color}">{dc:+.2f}%</td>'
-                        f'<td>{int(v/1000):,}K</td>'
-                        f'<td>{r_val}</td>'
-                        f'<td>{m_val}</td></tr>'
+                        f'<tr style="border-bottom:1px solid #F0F0F0;font-size:1rem">'
+                        f'<td style="padding:13px 10px;text-align:center;color:#616161">{dates[i]}</td>'
+                        f'<td style="padding:13px 10px;text-align:center;font-weight:600">${p:,.2f}</td>'
+                        f'<td style="padding:13px 10px;text-align:center;color:{chg_color};font-weight:700">{dc:+.2f}%</td>'
+                        f'<td style="padding:13px 10px;text-align:center">{vol_signal}</td>'
+                        f'<td style="padding:13px 10px;text-align:center">{rsi_signal}</td>'
+                        f'<td style="padding:13px 10px;text-align:center">{macd_signal}</td>'
+                        f'</tr>'
                     )
                 except: break
 
             st.markdown(
-                '<table style="width:100%;border-collapse:collapse;font-size:.85rem">'
-                '<tr style="background:#F8F9FA;font-weight:700">'
-                '<th style="padding:8px;border-bottom:2px solid #EEE">날짜</th>'
-                '<th style="padding:8px;border-bottom:2px solid #EEE">종가</th>'
-                '<th style="padding:8px;border-bottom:2px solid #EEE">등락</th>'
-                '<th style="padding:8px;border-bottom:2px solid #EEE">거래량</th>'
-                '<th style="padding:8px;border-bottom:2px solid #EEE">RSI</th>'
-                '<th style="padding:8px;border-bottom:2px solid #EEE">MACD</th>'
+                '<table style="width:100%;border-collapse:collapse;font-size:1rem;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.06)">'
+                '<tr style="background:#F8F9FA;font-weight:700;color:#424242">'
+                '<th style="padding:13px 10px;border-bottom:2px solid #EEE;text-align:center">날짜</th>'
+                '<th style="padding:13px 10px;border-bottom:2px solid #EEE;text-align:center">종가</th>'
+                '<th style="padding:13px 10px;border-bottom:2px solid #EEE;text-align:center">등락률</th>'
+                '<th style="padding:13px 10px;border-bottom:2px solid #EEE;text-align:center">거래량</th>'
+                '<th style="padding:13px 10px;border-bottom:2px solid #EEE;text-align:center">RSI</th>'
+                '<th style="padding:13px 10px;border-bottom:2px solid #EEE;text-align:center">MACD</th>'
                 '</tr>' + rows_html + '</table>',
                 unsafe_allow_html=True
             )
