@@ -172,10 +172,30 @@ def get_kis_token(app_key, app_secret):
         return ""
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def get_usd_krw():
+    try:
+        import yfinance as yf
+        return float(yf.Ticker("USDKRW=X").history(period="1d")['Close'].iloc[-1])
+    except:
+        return 1380.0
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_domestic_news(name):
     """국내 종목 구글 뉴스"""
     try:
         url = f"https://news.google.com/rss/search?q={urllib.parse.quote(name+' 주식')}&hl=ko&gl=KR&ceid=KR:ko"
+        res = requests.get(url, timeout=5)
+        root = ET.fromstring(res.text)
+        return [{"title": i.find('title').text, "link": i.find('link').text}
+                for i in root.findall('.//item')[:5]]
+    except:
+        return []
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_foreign_news(company_name):
+    """해외 종목 영문 구글 뉴스"""
+    try:
+        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(company_name+' stock')}&hl=en&gl=US&ceid=US:en"
         res = requests.get(url, timeout=5)
         root = ET.fromstring(res.text)
         return [{"title": i.find('title').text, "link": i.find('link').text}
@@ -190,31 +210,143 @@ def calc_bollinger_band(closes, period=20):
     std = s.rolling(period).std()
     return (sma + 2*std), sma, (sma - 2*std)
 
-def render_domestic_chart(code, name, closes, APP_KEY, APP_SECRET, token, n=60, chart_key=None):
-    """국내 종목 RSI+MACD+볼린저밴드 4단 차트"""
+def render_domestic_chart(code, name, closes, APP_KEY, APP_SECRET, token, n=120, chart_key=None):
+    """국내/해외 종목 RSI+MACD+볼린저밴드 4단 차트"""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    n = min(n, len(closes))
-    c_n = closes[-n:]
+    # ── 데이터 준비 ──────────────────────────────────────
+    # closes에서 유효한 값만 사용 (0 제거)
+    valid_closes = [c for c in closes if c and c > 0]
+    n = min(n, len(valid_closes))
+    if n < 26:
+        st.warning("차트를 그리기에 데이터가 부족합니다.")
+        return pd.Series(), pd.Series(), pd.Series(), []
 
-    # 지표 계산 먼저 (날짜 없어도 계산 가능)
-    s = pd.Series(closes)
+    c_n = valid_closes[-n:]
+
+    # ── 지표 계산 ──────────────────────────────────────
+    s = pd.Series(valid_closes)
     delta = s.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
     rsi = (100 - 100/(1 + gain/loss.replace(0, float('nan')))).fillna(50)
     ema12 = s.ewm(span=12, adjust=False).mean()
     ema26 = s.ewm(span=26, adjust=False).mean()
-    macd = ema12-ema26; sig = macd.ewm(span=9, adjust=False).mean(); hist_m = macd-sig
-    bb_up, bb_mid, bb_low = calc_bollinger_band(closes)
+    macd_line = ema12 - ema26
+    sig_line = macd_line.ewm(span=9, adjust=False).mean()
+    hist_m = macd_line - sig_line
+    bb_up, bb_mid, bb_low = calc_bollinger_band(valid_closes)
 
-    # 날짜 가져오기 (실패해도 인덱스로 대체)
+    # 마지막 n개만
+    rsi_n    = rsi.values[-n:]
+    macd_n   = macd_line.values[-n:]
+    sig_n    = sig_line.values[-n:]
+    hist_n   = hist_m.values[-n:]
+    bb_up_n  = bb_up.tolist()[-n:]
+    bb_mid_n = bb_mid.tolist()[-n:]
+    bb_low_n = bb_low.tolist()[-n:]
+
+    # ── 날짜 가져오기 ──────────────────────────────────
     dates_raw = []
     try:
-        end   = datetime.today().strftime("%Y%m%d")
-        start = (datetime.today()-timedelta(days=150)).strftime("%Y%m%d")
         if token:
+            end   = datetime.today().strftime("%Y%m%d")
+            start = (datetime.today()-timedelta(days=n+60)).strftime("%Y%m%d")
+            r2 = requests.get(
+                f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+                headers=kis_headers(APP_KEY, APP_SECRET, token, "FHKST03010100"),
+                params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":code,
+                        "FID_INPUT_DATE_1":start,"FID_INPUT_DATE_2":end,
+                        "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},timeout=7)
+            items2 = r2.json().get("output2",[])
+            dates_raw = [d.get("stck_bsop_date","") for d in items2 if d.get("stck_clpr")]
+            dates_raw.reverse()
+        else:
+            import yfinance as yf
+            hist = yf.Ticker(code).history(period="6mo")
+            if not hist.empty:
+                dates_raw = [d.strftime("%Y%m%d") for d in hist.index]
+    except: pass
+
+    # ── x축 날짜 MM.DD 변환 ────────────────────────────
+    if len(dates_raw) >= n:
+        d_list = dates_raw[-n:]
+        x_axis = []
+        for ds in d_list:
+            ds = str(ds)
+            if len(ds) == 8:
+                x_axis.append(f"{ds[4:6]}.{ds[6:]}")
+            else:
+                x_axis.append(str(ds)[:10][5:].replace('-','.'))
+    else:
+        x_axis = [f"D-{n-i}" for i in range(n)]
+
+    # 15일 간격 tick
+    tick_vals = [x_axis[i] for i in range(0, n, 15) if i < len(x_axis)]
+    xaxis_cfg = dict(
+        tickmode="array", tickvals=tick_vals, ticktext=tick_vals,
+        tickangle=-30, showspikes=True, spikemode="across",
+        spikesnap="cursor", spikecolor="#888888",
+        spikethickness=1, spikedash="dot"
+    )
+
+    # ── 차트 그리기 ────────────────────────────────────
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True,
+                        row_heights=[0.45,0.2,0.2,0.15],
+                        vertical_spacing=0.03,
+                        subplot_titles=[f"{name} 주가 + 볼린저밴드","RSI(14)","MACD",""])
+
+    fig.add_trace(go.Scatter(x=x_axis,y=c_n,line=dict(color="#1565C0",width=2),name="종가"),row=1,col=1)
+    fig.add_trace(go.Scatter(x=x_axis,y=bb_up_n,line=dict(color="#E24B4A",width=1,dash="dash"),name="BB상단"),row=1,col=1)
+    fig.add_trace(go.Scatter(x=x_axis,y=bb_mid_n,line=dict(color="#F57F17",width=1),name="BB중간"),row=1,col=1)
+    fig.add_trace(go.Scatter(x=x_axis,y=bb_low_n,line=dict(color="#2E7D32",width=1,dash="dash"),name="BB하단"),row=1,col=1)
+
+    fig.add_trace(go.Scatter(x=x_axis,y=rsi_n,line=dict(color="#6A1B9A",width=1.5),name="RSI"),row=2,col=1)
+    fig.add_hline(y=70,line_dash="dash",line_color="#E24B4A",row=2,col=1)
+    fig.add_hline(y=30,line_dash="dash",line_color="#2E7D32",row=2,col=1)
+
+    hcolors = ["#E24B4A" if v<0 else "#2E7D32" for v in hist_n]
+    fig.add_trace(go.Bar(x=x_axis,y=hist_n,marker_color=hcolors,name="히스토"),row=3,col=1)
+    fig.add_trace(go.Scatter(x=x_axis,y=macd_n,line=dict(color="#1565C0",width=1.5),name="MACD"),row=3,col=1)
+    fig.add_trace(go.Scatter(x=x_axis,y=sig_n,line=dict(color="#F57F17",width=1.5),name="시그널"),row=3,col=1)
+
+    fig.update_layout(
+        height=580, showlegend=False,
+        paper_bgcolor="white", plot_bgcolor="#F8F9FA",
+        margin=dict(l=10,r=10,t=30,b=50),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="white", font_size=12, bordercolor="#DDDDDD"),
+        xaxis =dict(**xaxis_cfg, showticklabels=False),
+        xaxis2=dict(**xaxis_cfg, showticklabels=False),
+        xaxis3=dict(**xaxis_cfg, showticklabels=False),
+        xaxis4=dict(**xaxis_cfg, showticklabels=True),
+    )
+
+    # ── 메트릭 ─────────────────────────────────────────
+    cur_rsi   = round(float(rsi_n[-1]),1)
+    cur_macd  = round(float(macd_n[-1]),2)
+    cur_sig   = round(float(sig_n[-1]),2)
+    cur_bb_up = float(bb_up_n[-1]); cur_bb_low = float(bb_low_n[-1])
+    current   = c_n[-1]
+    bb_pos    = "상단 돌파⚠️" if current>cur_bb_up else "하단 이탈🟢" if current<cur_bb_low else "밴드 내"
+
+    mc1,mc2,mc3,mc4 = st.columns(4)
+    mc1.metric("RSI(14)", cur_rsi, "과매수⚠️" if cur_rsi>=70 else "과매도🟢" if cur_rsi<=30 else "중립")
+    mc2.metric("MACD", cur_macd, "상승🟢" if cur_macd>cur_sig else "하락🔴")
+    mc3.metric("시그널", cur_sig)
+    mc4.metric("볼린저 위치", bb_pos)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key or f"chart_{code}")
+
+    return rsi, macd_line, sig_line, dates_raw
+
+    # 날짜 가져오기
+    dates_raw = []
+    try:
+        if token:
+            # 국내: KIS API — n일치 날짜
+            end   = datetime.today().strftime("%Y%m%d")
+            start = (datetime.today()-timedelta(days=n+30)).strftime("%Y%m%d")
             r2 = requests.get(
                 f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
                 headers=kis_headers(APP_KEY,APP_SECRET,token,"FHKST03010100"),
@@ -224,144 +356,122 @@ def render_domestic_chart(code, name, closes, APP_KEY, APP_SECRET, token, n=60, 
             items2 = r2.json().get("output2",[])
             dates_raw = [d.get("stck_bsop_date","") for d in items2 if d.get("stck_clpr")]
             dates_raw.reverse()
+        else:
+            # 해외(나스닥): yfinance
+            import yfinance as yf
+            hist = yf.Ticker(code).history(period="6mo")
+            if not hist.empty:
+                dates_raw = [d.strftime("%Y%m%d") for d in hist.index]
     except: pass
 
-    # 날짜 없으면 0,1,2... 인덱스 사용
+    # x축 날짜 생성 — YYYYMMDD → MM.DD
     if len(dates_raw) >= n:
-        d_n = pd.to_datetime(dates_raw[-n:])
+        d_list = dates_raw[-n:]
+        x_axis = []
+        for ds in d_list:
+            ds = str(ds)
+            if len(ds) == 8:
+                x_axis.append(f"{ds[4:6]}.{ds[6:]}")
+            else:
+                x_axis.append(str(ds)[:10][5:].replace('-','.'))
     else:
-        d_n = list(range(n))
+        # 날짜 없으면 역순 인덱스
+        x_axis = [f"D-{n-i}" for i in range(n)]
 
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True,
-                        row_heights=[0.45,0.2,0.2,0.15],
-                        vertical_spacing=0.03,
-                        subplot_titles=[f"{name} 주가 + 볼린저밴드","RSI(14)","MACD",""])
+    # 15일 간격 tick
+    tick_step = 15
+    tick_indices = list(range(0, n, tick_step))
+    tick_vals = [x_axis[i] for i in tick_indices if i < len(x_axis)]
 
-    # 주가 + 볼린저밴드
-    fig.add_trace(go.Scatter(x=d_n,y=c_n,line=dict(color="#1565C0",width=2),name="종가"),row=1,col=1)
-    fig.add_trace(go.Scatter(x=d_n,y=bb_up.tolist()[-n:],line=dict(color="#E24B4A",width=1,dash="dash"),name="BB상단"),row=1,col=1)
-    fig.add_trace(go.Scatter(x=d_n,y=bb_mid.tolist()[-n:],line=dict(color="#F57F17",width=1),name="BB중간"),row=1,col=1)
-    fig.add_trace(go.Scatter(x=d_n,y=bb_low.tolist()[-n:],line=dict(color="#2E7D32",width=1,dash="dash"),name="BB하단"),row=1,col=1)
-
-    # RSI
-    fig.add_trace(go.Scatter(x=d_n,y=rsi.values[-n:],line=dict(color="#6A1B9A",width=1.5),name="RSI"),row=2,col=1)
-    fig.add_hline(y=70,line_dash="dash",line_color="#E24B4A",row=2,col=1)
-    fig.add_hline(y=30,line_dash="dash",line_color="#2E7D32",row=2,col=1)
-
-    # MACD
-    hcolors = ["#E24B4A" if v<0 else "#2E7D32" for v in hist_m.values[-n:]]
-    fig.add_trace(go.Bar(x=d_n,y=hist_m.values[-n:],marker_color=hcolors,name="히스토"),row=3,col=1)
-    fig.add_trace(go.Scatter(x=d_n,y=macd.values[-n:],line=dict(color="#1565C0",width=1.5),name="MACD"),row=3,col=1)
-    fig.add_trace(go.Scatter(x=d_n,y=sig.values[-n:],line=dict(color="#F57F17",width=1.5),name="시그널"),row=3,col=1)
-
-    # x축 날짜 15일 간격 tickvals 계산
-    if len(dates_raw) >= n and isinstance(d_n[0] if hasattr(d_n,'__getitem__') else 0, str) is False:
-        try:
-            import numpy as np
-            tick_indices = list(range(0, n, 15))
-            tick_vals = [d_n[i] for i in tick_indices if i < len(d_n)]
-            tick_texts = [str(d_n[i])[:10].replace('-','.')[5:] for i in tick_indices if i < len(d_n)]
-            xaxis_cfg = dict(tickvals=tick_vals, ticktext=tick_texts, tickangle=-30,
-                           showspikes=True, spikemode="across", spikesnap="cursor",
-                           spikecolor="#888888", spikethickness=1, spikedash="dot")
-        except:
-            xaxis_cfg = dict(showspikes=True, spikemode="across")
-    else:
-        xaxis_cfg = dict(showspikes=True, spikemode="across")
-
-    fig.update_layout(
-        height=560, showlegend=False,
-        paper_bgcolor="white", plot_bgcolor="#F8F9FA",
-        margin=dict(l=10,r=10,t=30,b=60),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="white", font_size=12, bordercolor="#DDDDDD"),
-        xaxis=dict(**xaxis_cfg),
-        xaxis2=dict(**xaxis_cfg),
-        xaxis3=dict(**xaxis_cfg),
-        xaxis4=dict(**xaxis_cfg),
+    xaxis_cfg = dict(
+        tickmode="array",
+        tickvals=tick_vals,
+        ticktext=tick_vals,
+        tickangle=-30,
+        showspikes=True, spikemode="across",
+        spikesnap="cursor", spikecolor="#888888",
+        spikethickness=1, spikedash="dot"
     )
 
-    # 메트릭
-    cur_rsi  = round(float(rsi.values[-1]),1)
-    cur_macd = round(float(macd.values[-1]),2)
-    cur_sig  = round(float(sig.values[-1]),2)
-    cur_bb_up = float(bb_up.iloc[-1]); cur_bb_low = float(bb_low.iloc[-1])
-    current = closes[-1]
-    bb_pos = "상단 돌파⚠️" if current>cur_bb_up else "하단 이탈🟢" if current<cur_bb_low else "밴드 내"
-
-    mc1,mc2,mc3,mc4 = st.columns(4)
-    mc1.metric("RSI(14)", cur_rsi, "과매수⚠️" if cur_rsi>=70 else "과매도🟢" if cur_rsi<=30 else "중립")
-    mc2.metric("MACD", cur_macd, "상승🟢" if cur_macd>cur_sig else "하락🔴")
-    mc3.metric("시그널", cur_sig)
-    mc4.metric("볼린저 위치", bb_pos)
-    st.plotly_chart(fig, use_container_width=True, key=chart_key or f"chart_{code}")
-
-    return rsi, macd, sig, dates_raw
-
-def render_7day_table(closes, volumes, dates_raw, rsi_series, macd_series):
-    """최근 7거래일 추이 표 — 색상 신호 포함"""
+def render_7day_table(closes, volumes, dates_raw, rsi_series, macd_series, is_foreign=False, exc_rate=0):
+    """최근 7거래일 추이 표"""
     rows_html = ""
     dates_use = dates_raw if dates_raw else [f"D-{abs(i)}" for i in range(-1,-9,-1)]
+    avg_vol = sum(volumes[-20:]) / min(len(volumes), 20) if volumes else 0
+
     for i in range(-1, -8, -1):
         try:
             p = closes[i]; po = closes[i-1]; v = volumes[i] if volumes else 0
             dc = (p-po)/po*100
             chg_color = "#E24B4A" if dc>0 else "#1565C0"
-
             r_val = round(float(rsi_series.iloc[i]), 1)
             m_val = round(float(macd_series.iloc[i]), 2)
 
-            # RSI 신호 — 원 크게
+            # 종가/변동 표시
+            if is_foreign:
+                price_str = f"${p:,.2f}"
+                if exc_rate > 0:
+                    price_str += f'<br><span style="font-size:.75rem;color:var(--text-muted)">≈{int(p*exc_rate):,}원</span>'
+                change_str = f"${p-po:+,.2f}"
+            else:
+                price_str = f"{int(p):,}원"
+                change_str = f"{int(p-po):+,}원"
+
+            # RSI 신호 — 30↓ 초록, 70↑ 빨강
             if r_val >= 70:
                 rsi_signal = f'<span style="color:#E24B4A;font-weight:700">{r_val}</span>&nbsp;<span style="color:#E24B4A;font-size:1.4rem;line-height:1">●</span>'
             elif r_val <= 30:
                 rsi_signal = f'<span style="color:#2E7D32;font-weight:700">{r_val}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
             else:
-                rsi_signal = f'<span style="color:var(--text-sub)">{r_val}</span>'
+                rsi_signal = f'<span style="color:var(--text-main)">{r_val}</span>'
 
-            # MACD 신호 — 원 크게
+            # MACD 신호 — 양수 초록, 음수 빨강
             if m_val > 0:
-                macd_signal = f'<span style="color:#E24B4A;font-weight:700">{m_val:,}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
+                macd_signal = f'<span style="color:#2E7D32;font-weight:700">{m_val}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
             else:
-                macd_signal = f'<span style="color:#1565C0;font-weight:700">{m_val:,}</span>&nbsp;<span style="color:#E24B4A;font-size:1.4rem;line-height:1">●</span>'
+                macd_signal = f'<span style="color:#E24B4A;font-weight:700">{m_val}</span>&nbsp;<span style="color:#E24B4A;font-size:1.4rem;line-height:1">●</span>'
 
-            # 거래량 신호 (평균 대비)
-            avg_vol = sum(volumes[-20:]) / min(len(volumes), 20) if volumes else 0
+            # 거래량 — 평균 1.5배↑ 초록
             if avg_vol > 0 and v >= avg_vol * 1.5:
                 vol_signal = f'<span style="font-weight:600">{int(v):,}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
             else:
-                vol_signal = f'{int(v):,}'
+                vol_signal = f"{int(v):,}"
 
             date_str = dates_use[i] if abs(i) <= len(dates_use) else ""
             if isinstance(date_str, str) and len(date_str)==8:
+                # YYYYMMDD → MM.DD
                 date_str = f"{date_str[4:6]}.{date_str[6:]}"
+            elif isinstance(date_str, str) and len(date_str)==10:
+                # YYYY-MM-DD → MM.DD
+                date_str = date_str[5:].replace('-','.')
 
             rows_html += (
-                f'<tr style="border-bottom:1px solid #F0F0F0;font-size:1rem">'
-                f'<td style="padding:13px 10px;text-align:center;color:var(--text-muted)">{date_str}</td>'
-                f'<td style="padding:13px 10px;text-align:center;font-weight:600">{int(p):,}원</td>'
-                f'<td style="padding:13px 10px;text-align:center;color:{chg_color};font-weight:700">{int(p-po):+,}원</td>'
-                f'<td style="padding:13px 10px;text-align:center;color:{chg_color};font-weight:700">{dc:+.2f}%</td>'
-                f'<td style="padding:13px 10px;text-align:center">{vol_signal}</td>'
-                f'<td style="padding:13px 10px;text-align:center">{rsi_signal}</td>'
-                f'<td style="padding:13px 10px;text-align:center">{macd_signal}</td>'
-                f'</tr>'
+                '<tr style="border-bottom:1px solid var(--border);font-size:1rem">' +
+                f'<td style="padding:13px 10px;text-align:center;color:var(--text-muted)">{date_str}</td>' +
+                f'<td style="padding:13px 10px;text-align:center;font-weight:600">{price_str}</td>' +
+                f'<td style="padding:13px 10px;text-align:center;color:{chg_color};font-weight:700">{change_str}</td>' +
+                f'<td style="padding:13px 10px;text-align:center;color:{chg_color};font-weight:700">{dc:+.2f}%</td>' +
+                f'<td style="padding:13px 10px;text-align:center">{vol_signal}</td>' +
+                f'<td style="padding:13px 10px;text-align:center">{rsi_signal}</td>' +
+                f'<td style="padding:13px 10px;text-align:center">{macd_signal}</td>' +
+                '</tr>'
             )
         except: break
 
     st.markdown(
-        '<table style="width:100%;border-collapse:collapse;font-size:1rem;background:var(--bg-card);border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.06)">'
-        '<tr style="background:var(--bg-card2);font-weight:700;color:var(--text-sub);font-size:1rem">'
-        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">날짜</th>'
-        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">종가</th>'
-        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">변동</th>'
-        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">등락률</th>'
-        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">거래량<br><span style="font-size:.75rem;color:var(--text-light);font-weight:400">평균1.5배↑🟢</span></th>'
-        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">RSI<br><span style="font-size:.75rem;color:var(--text-light);font-weight:400">30↓매수🟢 70↑매도🔴</span></th>'
-        '<th style="padding:12px 10px;border-bottom:2px solid #EEE;text-align:center">MACD<br><span style="font-size:.75rem;color:var(--text-light);font-weight:400">양수🟢 음수🔴</span></th>'
+        '<table style="width:100%;border-collapse:collapse;font-size:1rem;background:var(--bg-card);border-radius:10px;overflow:hidden;box-shadow:0 2px 8px var(--shadow)">' +
+        '<tr style="background:var(--bg-card2);font-weight:700;color:var(--text-main);font-size:1rem">' +
+        '<th style="padding:12px 10px;border-bottom:2px solid var(--border);text-align:center">날짜</th>' +
+        '<th style="padding:12px 10px;border-bottom:2px solid var(--border);text-align:center">종가</th>' +
+        '<th style="padding:12px 10px;border-bottom:2px solid var(--border);text-align:center">변동</th>' +
+        '<th style="padding:12px 10px;border-bottom:2px solid var(--border);text-align:center">등락률</th>' +
+        '<th style="padding:12px 10px;border-bottom:2px solid var(--border);text-align:center">거래량<br><span style="font-size:.75rem;color:var(--text-light);font-weight:400">평균1.5배↑<span style="color:#2E7D32;font-size:1rem">●</span></span></th>' +
+        '<th style="padding:12px 10px;border-bottom:2px solid var(--border);text-align:center">RSI<br><span style="font-size:.75rem;color:var(--text-light);font-weight:400">30↓<span style="color:#2E7D32;font-size:1rem">●</span> 70↑<span style="color:#E24B4A;font-size:1rem">●</span></span></th>' +
+        '<th style="padding:12px 10px;border-bottom:2px solid var(--border);text-align:center">MACD<br><span style="font-size:.75rem;color:var(--text-light);font-weight:400">양수<span style="color:#2E7D32;font-size:1rem">●</span> 음수<span style="color:#E24B4A;font-size:1rem">●</span></span></th>' +
         '</tr>' + rows_html + '</table>',
         unsafe_allow_html=True
     )
+
 
 def kis_headers(app_key, app_secret, token, tr_id):
     return {
@@ -420,13 +530,45 @@ def get_ohlcv_info(code, app_key, app_secret, token):
     except:
         return {}
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_name_from_naver(code):
+    """네이버 금융에서 종목명 가져오기"""
+    try:
+        code = str(code).zfill(6)
+        url = f"https://finance.naver.com/item/main.nhn?code={code}"
+        res = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=5)
+        # og:title 메타태그에서 종목명 추출
+        import re
+        match = re.search(r'<title>([^:]+)\s*:', res.text)
+        if match:
+            name = match.group(1).strip()
+            if name and len(name) < 20:
+                return name
+        # h2 태그에서 추출
+        match2 = re.search(r'<h2[^>]*class="[^"]*h_company[^"]*"[^>]*>.*?<a[^>]*>([^<]+)<', res.text, re.DOTALL)
+        if match2:
+            return match2.group(1).strip()
+    except:
+        pass
+    return ""
+
 def get_stock_name(code, api_name=""):
-    """종목명 우선순위: API → theme_map → STOCK_NAMES → 코드"""
+    """종목명 우선순위: API → THEME_MAP → STOCK_NAMES → 네이버"""
+    code = str(code).strip().zfill(6)
+    # 1. KIS API 응답
     if api_name and api_name.strip():
         return api_name.strip()
+    # 2. THEME_MAP (965개)
     if code in THEME_MAP:
         return THEME_MAP[code]["name"]
-    return STOCK_NAMES.get(code, code)
+    # 3. STOCK_NAMES 하드코딩
+    if code in STOCK_NAMES:
+        return STOCK_NAMES[code]
+    # 4. 네이버 금융
+    naver_name = get_name_from_naver(code)
+    if naver_name:
+        return naver_name
+    return f"종목 {code}"
 
 def get_themes(code):
     """종목 테마 목록 반환"""
@@ -464,25 +606,109 @@ KOSDAQ=["247540","086520","373220","196170","263750","112040","357780","122870",
         "094360","095660","099190","101490","122310","141080","145990","153460",
         "166090","178320"]
 
+# ── 나스닥 100 종목 리스트 ──────────────────────────────
+NASDAQ100 = [
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","AVGO","COST",
+    "NFLX","ASML","AMD","QCOM","PEP","ADBE","AMAT","TXN","CSCO","INTU",
+    "AMGN","HON","BKNG","INTC","ISRG","SBUX","LRCX","MU","MDLZ","ADP",
+    "GILD","PANW","VRTX","ADI","REGN","KLAC","SNPS","CDNS","MNST","FTNT",
+    "MELI","CSX","ORLY","PYPL","CTAS","NXPI","PAYX","MRVL","AEP","ROST",
+    "CPRT","WDAY","KHC","ODFL","PCAR","CRWD","FAST","DXCM","IDXX","VRSK",
+    "BIIB","EXC","FANG","CTSH","EA","BKR","GEHC","ON","CEG","XEL",
+    "TEAM","ZS","DASH","ANSS","DLTR","WBD","SIRI","ILMN","WBA","ENPH",
+    "MRNA","PDD","TTD","PLTR","ANET","ABNB","GFS","CSGP","ALGN","DDOG",
+    "MDB","LCID","RIVN","ARM","SMCI","APP","IREN","BTQ","NOK","IONQ"
+]
+
+def get_yf_batch(tickers):
+    """yfinance 병렬처리로 여러 종목 한번에 가져오기 (캐시 없음 - 항상 최신)"""
+    try:
+        import yfinance as yf
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def fetch_one(ticker):
+            try:
+                stock = yf.Ticker(ticker)
+                hist  = stock.history(period="6mo")
+                if hist.empty or len(hist) < 25:
+                    return ticker, None
+                closes = hist['Close'].astype(float).tolist()
+                vols   = hist['Volume'].astype(float).tolist()
+                cur    = closes[-1]
+                ma25   = sum(closes[-25:])/25 if len(closes)>=25 else cur
+                gap    = round(cur/ma25*100, 1) if ma25>0 else 100
+                v7     = sum(vols[-7:])/7 if len(vols)>=7 else 0
+                v90    = sum(vols[-90:])/90 if len(vols)>=90 else 1
+                vi     = round(v7/v90, 2) if v90>0 else 1.0
+                h52    = max(closes); l52 = min(closes)
+                neg    = round((cur-l52)/(h52-l52)*100,1) if h52!=l52 else 50
+                exp    = round((h52-cur)/cur*100,1) if cur>0 else 0
+                ret30  = round((cur/closes[-30]-1)*100,1) if len(closes)>=30 else 0
+
+                # info에서 PER/PBR/EPS/성장률
+                try:
+                    si = stock.info
+                    per = float(si.get('trailingPE') or si.get('forwardPE') or 0)
+                    pbr = float(si.get('priceToBook') or 0)
+                    eps = float(si.get('trailingEps') or 0)
+                    # earningsGrowth는 소수점(0.183 = 18.3%) → 반드시 *100
+                    raw_growth = si.get('earningsGrowth') or si.get('revenueGrowth') or 0
+                    eps_growth = round(float(raw_growth) * 100, 1)
+                    name = si.get('shortName') or si.get('longName') or ticker
+                except:
+                    per=0; pbr=0; eps=0; eps_growth=0; name=ticker
+
+                return ticker, {
+                    "current": cur, "per": per, "pbr": pbr, "eps": eps,
+                    "eps_growth": eps_growth, "gap": gap, "vol_idx": vi,
+                    "neglect": neg, "exp_ret": exp, "ret30": ret30,
+                    "closes": closes, "volumes": vols, "name": name, "sector_gap": 0
+                }
+            except Exception as e:
+                return ticker, None
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            futures = {ex.submit(fetch_one, t): t for t in tickers}
+            for f in as_completed(futures):
+                ticker, data = f.result()
+                if data:
+                    results[ticker] = data
+        return results
+    except:
+        return {}
+
 # ── 사이드바 ────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ 파라미터")
-    peg_max    = st.slider("PEG 상한",           0.3, 2.0, 1.5, 0.1,
-                           help="1.5 이하 = 성장 대비 저평가. EPS 근사 오차 감안")
-    eps_min    = st.slider("EPS 성장률 하한(%)",  5,   50,   8,  1,
-                           help="근사값 기준 8%+. 실제 EPS는 더 높을 수 있음")
-    per_max    = st.slider("PER 상한",            5,   60,  40,  1,
-                           help="성장주는 PER 높은 경우 많음. 40 이하 권장")
-    gap_max    = st.slider("이격도 상한(%)",       85, 115, 103,  1,
-                           help="103% = 이평 약간 위. 반등 초기 종목 포함")
-    sector_min = st.slider("섹터 소외도 하한(%)",  0,   20,   0,  1,
-                           help="0 = 소외도 무관. 섹터 근사 오차 감안")
-    vol_min    = st.slider("거래량지수 하한",      1.0, 3.0, 1.0, 0.1,
+
+    # 시장 먼저 선택 — 나스닥 여부에 따라 기본값 자동 조정
+    market = st.selectbox("시장", ["KOSPI","KOSDAQ","KOSPI+KOSDAQ","🇺🇸 나스닥100"])
+    is_nasdaq = (market == "🇺🇸 나스닥100")
+
+    if is_nasdaq:
+        st.info("🇺🇸 나스닥100 최적 파라미터 자동 적용")
+        _peg_def, _eps_def, _per_def = 2.0, 10, 60
+        _gap_def, _sec_def, _vol_def = 110, 0, 1.0
+    else:
+        _peg_def, _eps_def, _per_def = 1.5, 8, 40
+        _gap_def, _sec_def, _vol_def = 103, 0, 1.0
+
+    peg_max    = st.slider("PEG 상한",           0.3, 3.0, float(_peg_def), 0.1,
+                           help="나스닥 성장주는 2.0 권장 / 국내는 1.5 권장")
+    eps_min    = st.slider("EPS 성장률 하한(%)",  5,   50,  _eps_def,  1,
+                           help="나스닥 10%+ / 국내 8%+")
+    per_max    = st.slider("PER 상한",            5,   80,  _per_def,  1,
+                           help="나스닥 성장주는 60 이상도 흔함")
+    gap_max    = st.slider("이격도 상한(%)",       85, 120, _gap_def,  1,
+                           help="나스닥 110% / 국내 103% 권장")
+    sector_min = st.slider("섹터 소외도 하한(%)",  0,   20,  _sec_def,  1,
+                           help="나스닥은 0 권장 (섹터 계산 미지원)")
+    vol_min    = st.slider("거래량지수 하한",      1.0, 3.0, _vol_def, 0.1,
                            help="1.0 = 최소한의 거래 있으면 OK")
     lynch_w    = st.slider("린치 가중치",         0.3, 0.8, 0.6, 0.1,
                            help="0.6 = 펀더멘털 60% + 타이밍 40%")
     bnf_w      = round(1.0-lynch_w, 1)
-    market     = st.selectbox("시장", ["KOSPI","KOSDAQ","KOSPI+KOSDAQ"])
     top_n      = st.slider("상위 종목 수", 5, 30, 10, 1)
     st.markdown("---")
     st.caption("💡 파라미터 가이드")
@@ -509,10 +735,34 @@ except:
 # ── 헤더 ────────────────────────────────────────────────
 today_str = datetime.today().strftime("%Y년 %m월 %d일")
 st.markdown(f"""
-<div class="lb-header">
-  <div class="date-badge">{today_str}</div>
-  <h1>LB SCREENER</h1>
-  <p>Lynch × BNF — 성장주 펀더멘털 발굴 + 기술적 타이밍 결합 | 한국투자증권 공식 API</p>
+<div class="lb-header" style="display:flex;gap:24px;align-items:stretch;flex-wrap:wrap">
+  <div style="flex:1;min-width:200px">
+    <div class="date-badge">{today_str}</div>
+    <h1>LB SCREENER</h1>
+    <p>Lynch × BNF — 성장주 펀더멘털 발굴 + 기술적 타이밍 결합 | 한국투자증권 공식 API</p>
+  </div>
+  <div style="display:flex;gap:12px;align-items:stretch;flex-wrap:wrap">
+    <div style="background:rgba(255,255,255,0.15);border-radius:12px;padding:16px 20px;min-width:200px;max-width:260px">
+      <div style="font-size:.68rem;font-weight:700;letter-spacing:2px;color:rgba(255,255,255,.7);margin-bottom:8px">📈 PETER LYNCH</div>
+      <div style="font-size:.92rem;font-weight:700;color:white;margin-bottom:6px">월가의 전설적 펀드매니저</div>
+      <div style="font-size:.8rem;color:rgba(255,255,255,.85);line-height:1.8">
+        피델리티 마젤란 펀드를 13년간 운용하며 연평균 <b style="color:white">29%</b> 수익률 달성.<br>
+        "내가 아는 종목에 투자하라"는 철학으로 유명.<br><br>
+        핵심 지표 <b style="color:white">PEG</b> — PER을 EPS 성장률로 나눈 값.<br>
+        <b style="color:#90CAF9">PEG &lt; 1이면 저평가</b>, 아무리 PER이 높아도 성장률이 더 높으면 싼 주식이라고 봤음.
+      </div>
+    </div>
+    <div style="background:rgba(255,255,255,0.15);border-radius:12px;padding:16px 20px;min-width:200px;max-width:260px">
+      <div style="font-size:.68rem;font-weight:700;letter-spacing:2px;color:rgba(255,255,255,.7);margin-bottom:8px">⚡ BNF (B.N.F)</div>
+      <div style="font-size:.92rem;font-weight:700;color:white;margin-bottom:6px">일본의 전설적 개인 투자자</div>
+      <div style="font-size:.8rem;color:rgba(255,255,255,.85);line-height:1.8">
+        300만엔으로 시작해 200억엔 이상으로 불린 일본 주식 신화.<br>
+        자신만의 규칙 하나로 승부 — <b style="color:white">이격도</b>.<br><br>
+        주가가 25일 이동평균에서 크게 <b style="color:#90CAF9">이탈(눌림목)</b>하면 매수, 회복하면 매도.<br>
+        "주가는 반드시 평균으로 돌아온다"는 평균회귀 전략.
+      </div>
+    </div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -531,59 +781,61 @@ tab4 = tab_foreign
 # 탭1: LB 스크리너
 # ════════════════════════════════════════════════════════
 with tab1:
-    c1,c2,c3,c4=st.columns(4)
-    with c1: st.markdown(f'<div class="stage-card stage-lynch"><div class="stage-label lynch-label">Stage 1 · 피터 린치</div><div class="stage-title">펀더멘털 필터</div><div class="stage-criteria">PEG <b>{peg_max}</b> 이하<br>EPS 성장률 <b>{eps_min}%+</b> 확인<br>6분류 — 고속성장주 우선</div></div>',unsafe_allow_html=True)
-    with c2: st.markdown(f'<div class="stage-card stage-bnf"><div class="stage-label bnf-label">Stage 2 · BNF</div><div class="stage-title">타이밍 필터</div><div class="stage-criteria">이격도 <b>{gap_max}%</b> 이하<br>섹터 내 소외 <b>{sector_min}%+</b><br>거래량 급증 확인</div></div>',unsafe_allow_html=True)
-    with c3: st.markdown(f'<div class="stage-card stage-score"><div class="stage-label score-label">Stage 3 · 결합</div><div class="stage-title">LB 스코어 산출</div><div class="stage-criteria">린치 품질 <b>×{lynch_w}</b><br>BNF 타이밍 <b>×{bnf_w}</b><br>상위 종목 자동 선별</div></div>',unsafe_allow_html=True)
-    with c4: st.markdown(f'<div class="stage-card stage-report"><div class="stage-label report-label">Stage 4 · 리포트</div><div class="stage-title">AI 투자 분석</div><div class="stage-criteria">Claude API 종목 해설<br>펀더멘털 + 기술적 분석<br>리스크 요인 자동 진단</div></div>',unsafe_allow_html=True)
+    # ── Stage 카드 4개 + 지표 해설 ──────────────────────
+    c1,c2,c3,c4 = st.columns(4)
+    with c1:
+        st.markdown(f'''<div class="stage-card stage-lynch">
+<div class="stage-label lynch-label">Stage 1 · 피터 린치</div>
+<div class="stage-title">펀더멘털 필터</div>
+<div class="stage-criteria">PEG <b>{peg_max}</b> 이하<br>EPS 성장률 <b>{eps_min}%+</b> 확인<br>6분류 — 고속성장주 우선</div>
+<hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+<div style="font-size:.78rem;color:var(--text-sub);line-height:1.9">
+<b style="color:#1565C0">PEG 기준</b><br>
+0.5↓ <b style="color:#2E7D32">강력매수</b> · 1.0↓ <b style="color:#1565C0">매수</b><br>
+1.5↓ <b style="color:#F57F17">보유</b> · 1.5↑ <b style="color:#C62828">고평가</b><br>
+<span style="color:var(--text-light);font-size:.72rem">PER이 높아도 성장률이 더 높으면 저평가</span>
+</div></div>''', unsafe_allow_html=True)
+
+    with c2:
+        st.markdown(f'''<div class="stage-card stage-bnf">
+<div class="stage-label bnf-label">Stage 2 · BNF</div>
+<div class="stage-title">타이밍 필터</div>
+<div class="stage-criteria">이격도 <b>{gap_max}%</b> 이하<br>섹터 내 소외 <b>{sector_min}%+</b><br>거래량 급증 확인</div>
+<hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+<div style="font-size:.78rem;color:var(--text-sub);line-height:1.9">
+<b style="color:#6A1B9A">이격도 기준</b><br>
+97↓ <b style="color:#2E7D32">눌림목</b> · 103↓ <b style="color:#F57F17">이평근처</b><br>
+103↑ <b style="color:#C62828">과열주의</b><br>
+<span style="color:var(--text-light);font-size:.72rem">현재가 ÷ 25일이평 × 100</span>
+</div></div>''', unsafe_allow_html=True)
+
+    with c3:
+        st.markdown(f'''<div class="stage-card stage-score">
+<div class="stage-label score-label">Stage 3 · 결합</div>
+<div class="stage-title">LB 스코어 산출</div>
+<div class="stage-criteria">린치 품질 <b>×{lynch_w}</b><br>BNF 타이밍 <b>×{bnf_w}</b><br>상위 종목 자동 선별</div>
+<hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+<div style="font-size:.78rem;color:var(--text-sub);line-height:1.9">
+<b style="color:#F57F17">LB 스코어 기준</b><br>
+70↑ <b style="color:#2E7D32">최우선</b> · 50↑ <b style="color:#1565C0">관심</b><br>
+30↑ <b style="color:#F57F17">참고</b> · 30↓ <b style="color:#C62828">미달</b><br>
+<span style="color:var(--text-light);font-size:.72rem">린치×{lynch_w} + BNF×{bnf_w} 결합 점수</span>
+</div></div>''', unsafe_allow_html=True)
+
+    with c4:
+        st.markdown(f'''<div class="stage-card stage-report">
+<div class="stage-label report-label">Stage 4 · 리포트</div>
+<div class="stage-title">AI 투자 분석</div>
+<div class="stage-criteria">Claude API 종목 해설<br>펀더멘털 + 기술적 분석<br>리스크 요인 자동 진단</div>
+<hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+<div style="font-size:.78rem;color:var(--text-sub);line-height:1.9">
+<b style="color:#2E7D32">EPS 성장률</b><br>
+25%↑ <b style="color:#2E7D32">고속성장</b> · 10%↑ <b style="color:#1565C0">견실</b><br>
+10%↓ <b style="color:#F57F17">완만</b><br>
+<span style="color:var(--text-light);font-size:.72rem">린치는 연 25%+ 성장주 선호</span>
+</div></div>''', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-
-    with st.expander("📖 지표 해설 — 어떤 숫자가 좋은가?"):
-        st.markdown("""
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-<div style="background:var(--bg-card);border-radius:10px;padding:14px;box-shadow:0 2px 8px rgba(0,0,0,.07)">
-<div style="color:#1565C0;font-weight:700;margin-bottom:8px">PEG (피터 린치 핵심)</div>
-<div style="font-size:.8rem;line-height:2">
-0.5 이하 → <b style="color:#2E7D32">강력매수</b><br>
-0.5~1.0 → <b style="color:#1565C0">매수</b><br>
-1.0~1.5 → <b style="color:#F57F17">보유</b><br>
-1.5 이상 → <b style="color:#C62828">고평가</b>
-</div>
-<div style="font-size:.75rem;color:var(--text-light);margin-top:6px">PER이 높아도 성장률이 더 높으면 저평가</div>
-</div>
-<div style="background:var(--bg-card);border-radius:10px;padding:14px;box-shadow:0 2px 8px rgba(0,0,0,.07)">
-<div style="color:#1565C0;font-weight:700;margin-bottom:8px">EPS 성장률</div>
-<div style="font-size:.8rem;line-height:2">
-25% 이상 → <b style="color:#2E7D32">고속성장주</b><br>
-10~25%  → <b style="color:#1565C0">견실성장주</b><br>
-0~10%   → <b style="color:#F57F17">완만성장주</b><br>
-마이너스 → <b style="color:#C62828">적자 (제외)</b>
-</div>
-<div style="font-size:.75rem;color:var(--text-light);margin-top:6px">린치는 연 25%+ 성장주 선호</div>
-</div>
-<div style="background:var(--bg-card);border-radius:10px;padding:14px;box-shadow:0 2px 8px rgba(0,0,0,.07)">
-<div style="color:#6A1B9A;font-weight:700;margin-bottom:8px">이격도 (BNF 핵심)</div>
-<div style="font-size:.8rem;line-height:2">
-90% 이하 → <b style="color:#2E7D32">강한 눌림목</b><br>
-90~97%  → <b style="color:#1565C0">눌림목 구간</b><br>
-97~103% → <b style="color:#F57F17">이평 근처</b><br>
-103% 이상 → <b style="color:#C62828">과열</b>
-</div>
-<div style="font-size:.75rem;color:var(--text-light);margin-top:6px">현재가 ÷ 25일이평 × 100</div>
-</div>
-<div style="background:var(--bg-card);border-radius:10px;padding:14px;box-shadow:0 2px 8px rgba(0,0,0,.07)">
-<div style="color:#6A1B9A;font-weight:700;margin-bottom:8px">LB 스코어</div>
-<div style="font-size:.8rem;line-height:2">
-70 이상 → <b style="color:#2E7D32">최우선 주목</b><br>
-50~70  → <b style="color:#1565C0">관심 종목</b><br>
-30~50  → <b style="color:#F57F17">참고 종목</b><br>
-30 이하 → <b style="color:#C62828">조건 미달</b>
-</div>
-<div style="font-size:.75rem;color:var(--text-light);margin-top:6px">린치×0.6 + BNF×0.4 결합 점수</div>
-</div>
-</div>
-""", unsafe_allow_html=True)
 
     run = st.button("▶ 스크리닝 실행", use_container_width=True, key="run_btn")
 
@@ -591,164 +843,250 @@ with tab1:
     if "token"    not in st.session_state: st.session_state.token    = ""
 
     if run:
-        with st.spinner("KIS API 토큰 발급 중..."):
-            token = get_kis_token(APP_KEY, APP_SECRET)
-        if not token:
-            st.error("토큰 발급 실패. App Key / App Secret을 확인해주세요.")
-            st.stop()
-        st.session_state.token = token
+        # ── 나스닥100 스크리닝 (yfinance 병렬처리) ──────────
+        if market == "🇺🇸 나스닥100":
+            stat = st.empty()
+            stat.markdown("⚡ 나스닥100 병렬 수집 중... (20~30초 소요)")
+            prog = st.progress(0)
 
-        codes = KOSPI if market=="KOSPI" else KOSDAQ if market=="KOSDAQ" else KOSPI+KOSDAQ
-        try:
-            sam=get_ohlcv_info("005930",APP_KEY,APP_SECRET,token)
-            mkt_ret=sam.get("ret30",0)
-        except:
-            mkt_ret=0
+            with st.spinner("yfinance 병렬 처리 중..."):
+                yf_data = get_yf_batch(NASDAQ100)
 
-        results=[]; prog=st.progress(0); stat=st.empty()
-        for i,code in enumerate(codes):
-            pct=int((i+1)/len(codes)*100)
-            prog.progress(pct)
-            pi=get_price_info(code,APP_KEY,APP_SECRET,token)
-            if not pi or pi.get("per",0)<=0 or pi.get("eps",0)<=0:
-                continue
-            name=get_stock_name(code, pi.get("name",""))
-            per=pi.get("per",0); pbr=pi.get("pbr",0)
-            eps=pi.get("eps",0); current=pi.get("current",0)
-            stat.markdown(f"🔍 **{name}** 분석 중... `{pct}%`")
-            ov=get_ohlcv_info(code,APP_KEY,APP_SECRET,token)
-            if not ov: continue
+            prog.progress(50)
+            stat.markdown(f"✅ {len(yf_data)}개 종목 수집 완료 — LB 스코어 계산 중...")
 
-            # EPS 성장률 — 기대수익률 + 소외지수 복합 근사
-            exp_ret = ov.get("exp_ret", 0)
-            neglect = ov.get("neglect", 50)
-            # 소외지수가 낮을수록(많이 빠진 종목일수록) 반등 여력 크다고 가정
-            # 기대수익률(52주고점 회복 여력)을 성장률 프록시로 활용
-            eg = max(
-                exp_ret * 0.5,                          # 기대수익률 기반
-                max(0, (100 - neglect) / 5),            # 소외지수 기반 (소외될수록 높게)
-                5.0                                     # 최소 5% 보장 (흑자 기업이면)
-            )
-            peg = round(per/eg, 2) if eg>0 else 99
-            sg  = round(mkt_ret - ov.get("ret30",0), 1)
+            results = []
+            for i, ticker in enumerate(NASDAQ100):
+                d = yf_data.get(ticker)
+                if not d: continue
+                per = d.get("per", 0); eps_growth = d.get("eps_growth", 0)
+                if per <= 0: continue
+                exp_ret = d.get("exp_ret", 0)
+                neglect = d.get("neglect", 50)
+                eps_growth_raw = d.get("eps_growth", 0)
 
-            rec = {"code":code,"name":name,"current":current,"per":per,"pbr":pbr,
-                   "eps":eps,"eps_growth":eg,"peg":peg,"gap":ov.get("gap",100),
-                   "vol_idx":ov.get("vol_idx",1),"sector_gap":sg,
-                   "neglect":neglect,"exp_ret":exp_ret,
-                   "themes":get_themes(code)}
+                # yfinance earningsGrowth는 소수점(0.183=18.3%) → 100 곱해야 함
+                # get_yf_batch에서 이미 *100 처리되어 있으면 그대로, 아니면 변환
+                eps_growth = eps_growth_raw if eps_growth_raw > 1 else eps_growth_raw * 100
 
-            # ── 필터 (EPS 필터 완화 — 근사값이므로 PEG로 대체 판단) ──
-            if peg > peg_max: continue
-            if per > per_max: continue
-            if ov.get("gap",100) > gap_max: continue
-            # EPS/섹터소외 필터는 소프트하게 (결과 없음 방지)
-            # eg < eps_min 이어도 PEG가 충분히 낮으면 통과
+                # EPS 성장률 근사
+                if eps_growth > 0:
+                    eg = eps_growth
+                else:
+                    eg = max(
+                        exp_ret * 0.5,
+                        max(0, (100 - neglect) / 5),
+                        5.0
+                    )
 
-            rec.update(calc_lb(rec,peg_max,eps_min,gap_max,sector_min,vol_min,lynch_w,bnf_w))
+                # PEG 계산
+                if per > 0 and eg > 0:
+                    peg = round(per / eg, 2)
+                elif per > 0:
+                    peg = round(per / 10, 2)
+                else:
+                    peg = 1.0
 
-            # ── 선별 이유 — 초보자 친화적 서술형 ──
-            reason_parts = []
-            gap_now = ov.get("gap", 100)
-            vol_now = ov.get("vol_idx", 1)
+                # 나스닥 필터 — PER 상한 완화 (성장주 특성상 PER 높음)
+                if per > 0 and peg > peg_max: continue
+                if d.get("gap", 100) > gap_max: continue
+                # PER 상한은 나스닥에서 제외 (PLTR 같은 고PER 성장주 포함)
 
-            # ① 가격 매력도 (PEG 기반)
-            if peg <= 0.5:
-                reason_parts.append(
-                    f"이 종목은 현재 벌어들이는 이익의 성장 속도에 비해 주가가 절반도 안 되게 평가받고 있어요(PEG {peg}). "
-                    f"쉽게 말해 '이 정도 실력이면 훨씬 비싸야 하는데 시장이 아직 모르고 있다'는 뜻입니다."
+                rec = {
+                    "code": ticker, "name": d.get("name", ticker),
+                    "current": d["current"], "per": per,
+                    "pbr": d.get("pbr", 0), "eps": d.get("eps", 0),
+                    "eps_growth": eg, "peg": peg,
+                    "gap": d.get("gap", 100), "vol_idx": d.get("vol_idx", 1),
+                    "sector_gap": 0, "neglect": neglect,
+                    "exp_ret": exp_ret, "themes": [],
+                    "is_foreign": True,
+                    "closes": d.get("closes", []),
+                    "volumes": d.get("volumes", [])
+                }
+                scores = calc_lb(rec, peg_max, eps_min, gap_max, sector_min, vol_min, lynch_w, bnf_w)
+                rec.update(scores)
+
+                # 서술형 해설
+                gap_now = d.get("gap", 100)
+                parts = []
+                if peg <= 0.5:   parts.append(f"이익 성장 속도에 비해 주가가 절반도 안 되게 저평가받고 있어요(PEG {peg}).")
+                elif peg <= 1.0: parts.append(f"성장 속도 대비 주가가 저렴한 편입니다(PEG {peg}). 피터 린치가 좋아하는 구간이에요.")
+                elif peg <= 1.5: parts.append(f"성장성 대비 주가가 적정 수준입니다(PEG {peg}).")
+                if gap_now < 94:   parts.append(f"최근 평균가보다 {100-gap_now:.0f}% 낮게 거래 중이에요. 눌림목 매수 타이밍입니다.")
+                elif gap_now < 100: parts.append(f"평균선 아래({gap_now}%)에 있어 반등 가능성이 있는 구간이에요.")
+                if exp_ret > 30: parts.append(f"52주 고점 대비 {exp_ret}% 낮아 고점 회복 시 큰 수익을 기대할 수 있어요.")
+                rec["reason_text"] = " ".join(parts[:3]) if parts else f"PEG {peg}, 이격도 {gap_now}% 기준 LB 조건 충족 종목입니다."
+                results.append(rec)
+                prog.progress(50 + int((i+1)/len(NASDAQ100)*50))
+
+            prog.empty(); stat.empty()
+            if not results:
+                st.warning("조건 충족 종목이 없습니다. PEG 상한이나 이격도 상한을 높여보세요.")
+            st.session_state.results = sorted(results, key=lambda x:x["lb_score"], reverse=True)[:top_n]
+            st.session_state.token = ""  # 나스닥은 token 불필요
+
+        # ── 국내 스크리닝 (KIS API) ──────────────────────────
+        else:
+            with st.spinner("KIS API 토큰 발급 중..."):
+                token = get_kis_token(APP_KEY, APP_SECRET)
+            if not token:
+                st.error("토큰 발급 실패. App Key / App Secret을 확인해주세요.")
+                st.stop()
+            st.session_state.token = token
+
+            codes = KOSPI if market=="KOSPI" else KOSDAQ if market=="KOSDAQ" else KOSPI+KOSDAQ
+            try:
+                sam=get_ohlcv_info("005930",APP_KEY,APP_SECRET,token)
+                mkt_ret=sam.get("ret30",0)
+            except:
+                mkt_ret=0
+
+            results=[]; prog=st.progress(0); stat=st.empty()
+            for i,code in enumerate(codes):
+                pct=int((i+1)/len(codes)*100)
+                prog.progress(pct)
+                pi=get_price_info(code,APP_KEY,APP_SECRET,token)
+                if not pi or pi.get("per",0)<=0 or pi.get("eps",0)<=0:
+                    continue
+                name=get_stock_name(code, pi.get("name",""))
+                per=pi.get("per",0); pbr=pi.get("pbr",0)
+                eps=pi.get("eps",0); current=pi.get("current",0)
+                stat.markdown(f"🔍 **{name}** 분석 중... `{pct}%`")
+                ov=get_ohlcv_info(code,APP_KEY,APP_SECRET,token)
+                if not ov: continue
+
+                # EPS 성장률 — 기대수익률 + 소외지수 복합 근사
+                exp_ret = ov.get("exp_ret", 0)
+                neglect = ov.get("neglect", 50)
+                # 소외지수가 낮을수록(많이 빠진 종목일수록) 반등 여력 크다고 가정
+                # 기대수익률(52주고점 회복 여력)을 성장률 프록시로 활용
+                eg = max(
+                    exp_ret * 0.5,                          # 기대수익률 기반
+                    max(0, (100 - neglect) / 5),            # 소외지수 기반 (소외될수록 높게)
+                    5.0                                     # 최소 5% 보장 (흑자 기업이면)
                 )
-            elif peg <= 1.0:
-                reason_parts.append(
-                    f"이익이 늘어나는 속도에 비해 주가가 저렴한 편입니다(PEG {peg}). "
-                    f"피터 린치가 가장 좋아하는 구간으로, 성장주인데 아직 저평가된 상태예요."
-                )
-            elif peg <= 1.5:
-                reason_parts.append(
-                    f"성장성 대비 주가 수준이 적정 범위에 있습니다(PEG {peg}). "
-                    f"크게 싸지는 않지만, 다른 조건들이 좋다면 관심 가질 만한 구간입니다."
-                )
+                peg = round(per/eg, 2) if eg>0 else 99
+                sg  = round(mkt_ret - ov.get("ret30",0), 1)
 
-            # ② 타이밍 (이격도 기반 — BNF 스타일)
-            if gap_now < 94:
-                reason_parts.append(
-                    f"주가가 최근 한 달 평균 가격보다 {100-gap_now:.0f}% 더 낮게 거래되고 있어요. "
-                    f"일본의 전설적 트레이더 BNF이 즐겨 쓰는 '눌림목 매수' 전략에 딱 맞는 타이밍입니다."
-                )
-            elif gap_now < 100:
-                reason_parts.append(
-                    f"주가가 최근 한 달 평균선 바로 아래({gap_now}%)에 있어요. "
-                    f"보통 이 구간에서 반등이 나오는 경우가 많고, BNF식 단기 매수 타이밍으로 봅니다."
-                )
-            elif gap_now <= gap_max:
-                reason_parts.append(
-                    f"주가가 평균선 근처({gap_now}%)에서 지지받고 있는지 확인 중입니다. "
-                    f"지지가 확인되면 추가 상승 여력이 있을 수 있어요."
-                )
+                rec = {"code":code,"name":name,"current":current,"per":per,"pbr":pbr,
+                       "eps":eps,"eps_growth":eg,"peg":peg,"gap":ov.get("gap",100),
+                       "vol_idx":ov.get("vol_idx",1),"sector_gap":sg,
+                       "neglect":neglect,"exp_ret":exp_ret,
+                       "themes":get_themes(code)}
 
-            # ③ 관심도 (소외지수 — 쉬운 말로)
-            if neglect < 20:
-                reason_parts.append(
-                    f"지난 1년 동안 투자자들의 관심에서 거의 벗어나 있던 종목이에요(관심도 하위 {neglect}%). "
-                    f"아무도 주목하지 않을 때 사서, 관심 받을 때 파는 역발상 투자의 핵심 후보입니다."
-                )
-            elif neglect < 40:
-                reason_parts.append(
-                    f"1년 중 상당 기간 투자자들의 관심 밖에 있었던 종목입니다(관심도 {neglect}%). "
-                    f"아직 많이 오르지 않아 뒤늦게 쫓아가는 위험이 적어요."
-                )
+                # ── 필터 (EPS 필터 완화 — 근사값이므로 PEG로 대체 판단) ──
+                if peg > peg_max: continue
+                if per > per_max: continue
+                if ov.get("gap",100) > gap_max: continue
+                # EPS/섹터소외 필터는 소프트하게 (결과 없음 방지)
+                # eg < eps_min 이어도 PEG가 충분히 낮으면 통과
 
-            # ④ 회복 여력
-            if exp_ret > 40:
-                reason_parts.append(
-                    f"작년 최고가 대비 현재 주가가 {exp_ret}%나 낮습니다. "
-                    f"고점을 회복하기만 해도 그만큼의 수익을 기대할 수 있어요."
-                )
-            elif exp_ret > 15:
-                reason_parts.append(
-                    f"작년 최고가 대비 {exp_ret}% 낮은 가격에 거래 중이에요. "
-                    f"고점 회복 시 {exp_ret}%의 수익 여력이 있습니다."
-                )
+                rec.update(calc_lb(rec,peg_max,eps_min,gap_max,sector_min,vol_min,lynch_w,bnf_w))
 
-            # ⑤ 자산 대비 가격
-            if pbr > 0 and pbr < 0.7:
-                reason_parts.append(
-                    f"회사가 가진 순자산보다 주가가 더 싸요(PBR {pbr}). "
-                    f"지금 당장 회사를 청산해도 주주에게 이익이 남는 수준입니다."
-                )
-            elif pbr > 0 and pbr < 1.0:
-                reason_parts.append(
-                    f"회사의 실제 자산 가치보다 주가가 낮게 평가받고 있어요(PBR {pbr}). "
-                    f"자산 기준으로도 저평가된 상태입니다."
-                )
+                # ── 선별 이유 — 초보자 친화적 서술형 ──
+                reason_parts = []
+                gap_now = ov.get("gap", 100)
+                vol_now = ov.get("vol_idx", 1)
 
-            # ⑥ 거래량 (관심 유입 신호)
-            if vol_now >= 2.0:
-                reason_parts.append(
-                    f"최근 거래량이 평소보다 {vol_now}배나 늘었어요. "
-                    f"기관이나 큰손들이 조용히 매집하고 있다는 신호일 수 있습니다."
-                )
-            elif vol_now >= 1.5:
-                reason_parts.append(
-                    f"거래량이 평소 대비 {vol_now}배 수준으로, 서서히 투자자들의 관심이 모이고 있는 신호입니다."
-                )
+                # ① 가격 매력도 (PEG 기반)
+                if peg <= 0.5:
+                    reason_parts.append(
+                        f"이 종목은 현재 벌어들이는 이익의 성장 속도에 비해 주가가 절반도 안 되게 평가받고 있어요(PEG {peg}). "
+                        f"쉽게 말해 '이 정도 실력이면 훨씬 비싸야 하는데 시장이 아직 모르고 있다'는 뜻입니다."
+                    )
+                elif peg <= 1.0:
+                    reason_parts.append(
+                        f"이익이 늘어나는 속도에 비해 주가가 저렴한 편입니다(PEG {peg}). "
+                        f"피터 린치가 가장 좋아하는 구간으로, 성장주인데 아직 저평가된 상태예요."
+                    )
+                elif peg <= 1.5:
+                    reason_parts.append(
+                        f"성장성 대비 주가 수준이 적정 범위에 있습니다(PEG {peg}). "
+                        f"크게 싸지는 않지만, 다른 조건들이 좋다면 관심 가질 만한 구간입니다."
+                    )
 
-            if reason_parts:
-                rec["reason_text"] = " ".join(reason_parts[:3])
-            else:
-                rec["reason_text"] = (
-                    f"저희 LB 스코어 기준(PEG {peg}, 이격도 {gap_now}%)으로 "
-                    f"성장성과 타이밍이 동시에 충족된 종목으로 선별되었습니다."
-                )
+                # ② 타이밍 (이격도 기반 — BNF 스타일)
+                if gap_now < 94:
+                    reason_parts.append(
+                        f"주가가 최근 한 달 평균 가격보다 {100-gap_now:.0f}% 더 낮게 거래되고 있어요. "
+                        f"일본의 전설적 트레이더 BNF이 즐겨 쓰는 '눌림목 매수' 전략에 딱 맞는 타이밍입니다."
+                    )
+                elif gap_now < 100:
+                    reason_parts.append(
+                        f"주가가 최근 한 달 평균선 바로 아래({gap_now}%)에 있어요. "
+                        f"보통 이 구간에서 반등이 나오는 경우가 많고, BNF식 단기 매수 타이밍으로 봅니다."
+                    )
+                elif gap_now <= gap_max:
+                    reason_parts.append(
+                        f"주가가 평균선 근처({gap_now}%)에서 지지받고 있는지 확인 중입니다. "
+                        f"지지가 확인되면 추가 상승 여력이 있을 수 있어요."
+                    )
 
-            results.append(rec)
-            # ── 실시간으로 발견 종목 즉시 표시 ──
-            stat.markdown(f"🔍 `{pct}%` 분석 중... ✅ **{len(results)}개 발견** — 최근: {name}")
+                # ③ 관심도 (소외지수 — 쉬운 말로)
+                if neglect < 20:
+                    reason_parts.append(
+                        f"지난 1년 동안 투자자들의 관심에서 거의 벗어나 있던 종목이에요(관심도 하위 {neglect}%). "
+                        f"아무도 주목하지 않을 때 사서, 관심 받을 때 파는 역발상 투자의 핵심 후보입니다."
+                    )
+                elif neglect < 40:
+                    reason_parts.append(
+                        f"1년 중 상당 기간 투자자들의 관심 밖에 있었던 종목입니다(관심도 {neglect}%). "
+                        f"아직 많이 오르지 않아 뒤늦게 쫓아가는 위험이 적어요."
+                    )
 
-        prog.empty(); stat.empty()
-        if not results:
-            st.warning("조건을 만족하는 종목이 없습니다. 사이드바에서 PEG 상한이나 이격도 상한을 높여보세요.")
-        st.session_state.results=sorted(results,key=lambda x:x["lb_score"],reverse=True)[:top_n]
+                # ④ 회복 여력
+                if exp_ret > 40:
+                    reason_parts.append(
+                        f"작년 최고가 대비 현재 주가가 {exp_ret}%나 낮습니다. "
+                        f"고점을 회복하기만 해도 그만큼의 수익을 기대할 수 있어요."
+                    )
+                elif exp_ret > 15:
+                    reason_parts.append(
+                        f"작년 최고가 대비 {exp_ret}% 낮은 가격에 거래 중이에요. "
+                        f"고점 회복 시 {exp_ret}%의 수익 여력이 있습니다."
+                    )
+
+                # ⑤ 자산 대비 가격
+                if pbr > 0 and pbr < 0.7:
+                    reason_parts.append(
+                        f"회사가 가진 순자산보다 주가가 더 싸요(PBR {pbr}). "
+                        f"지금 당장 회사를 청산해도 주주에게 이익이 남는 수준입니다."
+                    )
+                elif pbr > 0 and pbr < 1.0:
+                    reason_parts.append(
+                        f"회사의 실제 자산 가치보다 주가가 낮게 평가받고 있어요(PBR {pbr}). "
+                        f"자산 기준으로도 저평가된 상태입니다."
+                    )
+
+                # ⑥ 거래량 (관심 유입 신호)
+                if vol_now >= 2.0:
+                    reason_parts.append(
+                        f"최근 거래량이 평소보다 {vol_now}배나 늘었어요. "
+                        f"기관이나 큰손들이 조용히 매집하고 있다는 신호일 수 있습니다."
+                    )
+                elif vol_now >= 1.5:
+                    reason_parts.append(
+                        f"거래량이 평소 대비 {vol_now}배 수준으로, 서서히 투자자들의 관심이 모이고 있는 신호입니다."
+                    )
+
+                if reason_parts:
+                    rec["reason_text"] = " ".join(reason_parts[:3])
+                else:
+                    rec["reason_text"] = (
+                        f"저희 LB 스코어 기준(PEG {peg}, 이격도 {gap_now}%)으로 "
+                        f"성장성과 타이밍이 동시에 충족된 종목으로 선별되었습니다."
+                    )
+
+                results.append(rec)
+                # ── 실시간으로 발견 종목 즉시 표시 ──
+                stat.markdown(f"🔍 `{pct}%` 분석 중... ✅ **{len(results)}개 발견** — 최근: {name}")
+
+
+                prog.empty(); stat.empty()
+                if not results:
+                    st.warning("조건을 만족하는 종목이 없습니다. 사이드바에서 PEG 상한이나 이격도 상한을 높여보세요.")
+                st.session_state.results=sorted(results,key=lambda x:x["lb_score"],reverse=True)[:top_n]
 
     if st.session_state.results:
         res=st.session_state.results
@@ -775,14 +1113,29 @@ with tab1:
             # 각 파트를 별도 변수로 분리
             theme_part = '<div style="margin-top:5px">' + theme_tags + '</div>' if theme_tags else ''
             reason_part = '<div style="background:var(--chip-bg);border-radius:10px;padding:10px 14px;font-size:.85rem;color:#333;line-height:1.7;border-left:3px solid #1565C0;min-width:200px;max-width:340px;align-self:center">💡 ' + reason_text + '</div>' if reason_text else '<div style="min-width:10px"></div>'
+            # 통화 표시 — 나스닥은 $, 국내는 원
+            is_foreign = r.get("is_foreign", False)
+            if is_foreign:
+                current_val = f'${r["current"]:,.2f}'
+                try:
+                    exc = get_usd_krw()
+                    krw_val = f'≈ {int(r["current"]*exc):,}원'
+                except:
+                    krw_val = ""
+            else:
+                current_val = f'{int(r["current"]):,}원'
+                krw_val = ""
             name_val = r["name"]
             code_val = r["code"]
-            current_val = f'{int(r["current"]):,}'
             peg_val = r["peg"]
             eps_val = f'{r["eps_growth"]:.1f}'
             gap_val = r["gap"]
             lb_val = r["lb_score"]
             grade_val = r["peg_grade"]
+
+            price_line = current_val
+            if krw_val:
+                price_line += f'<span style="font-size:.78rem;color:var(--text-muted);margin-left:8px">{krw_val}</span>'
 
             card_html = (
                 '<div class="stock-card ' + rc + '">'
@@ -793,7 +1146,7 @@ with tab1:
                 '<span class="stock-cat">' + cat + '</span></div>'
                 '<div style="margin-top:4px">'
                 '<span style="font-size:.78rem;color:var(--text-light)">현재가 </span>'
-                '<span style="font-size:.85rem;font-weight:700">' + current_val + '원</span>'
+                '<span style="font-size:.85rem;font-weight:700">' + price_line + '</span>'
                 '&nbsp;&nbsp;'
                 '<span style="font-size:.75rem;color:#1565C0;font-weight:700">' + grade_val + '</span>'
                 '</div>'
@@ -812,29 +1165,39 @@ with tab1:
             st.markdown(card_html, unsafe_allow_html=True)
 
             with st.expander(f"📊 {r['name']} — RSI · MACD 차트"):
-                ov=get_ohlcv_info(r["code"],APP_KEY,APP_SECRET,st.session_state.get("token",""))
-                if ov and ov.get("closes"):
-                    closes=ov["closes"]
-                    if len(closes)>=26:
+                # 나스닥 종목은 closes가 이미 있음, 국내는 API 호출
+                if r.get("is_foreign") and r.get("closes"):
+                    closes = r["closes"]
+                else:
+                    ov=get_ohlcv_info(r["code"],APP_KEY,APP_SECRET,st.session_state.get("token",""))
+                    closes = ov.get("closes",[]) if ov else []
+                if closes and len(closes)>=26:
                         rsi_s, macd_s, sig_s, dates_raw2 = render_domestic_chart(
                             r["code"], r["name"], closes, APP_KEY, APP_SECRET,
                             st.session_state.get("token",""), chart_key=f"lb_{r['code']}")
                         st.markdown("**📋 최근 7거래일 추이**")
-                        # 거래량 가져오기
-                        try:
-                            end2=datetime.today().strftime("%Y%m%d")
-                            start2=(datetime.today()-timedelta(days=200)).strftime("%Y%m%d")
-                            rv=requests.get(
-                                f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-                                headers=kis_headers(APP_KEY,APP_SECRET,token,"FHKST03010100"),
-                                params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":r["code"],
-                                        "FID_INPUT_DATE_1":start2,"FID_INPUT_DATE_2":end2,
-                                        "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},timeout=10)
-                            vols2=[float(d.get("acml_vol",0) or 0) for d in rv.json().get("output2",[]) if d.get("stck_clpr")]
-                            vols2.reverse()
-                        except: vols2=[]
-                        render_7day_table(closes, vols2, dates_raw2, rsi_s, macd_s)
-                        news_list = get_domestic_news(r["name"])
+                        # 거래량 — 나스닥은 rec에 저장된 값, 국내는 KIS API
+                        if r.get("is_foreign"):
+                            vols2 = r.get("volumes", [])
+                        else:
+                            try:
+                                end2=datetime.today().strftime("%Y%m%d")
+                                start2=(datetime.today()-timedelta(days=200)).strftime("%Y%m%d")
+                                rv=requests.get(
+                                    f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+                                    headers=kis_headers(APP_KEY,APP_SECRET,st.session_state.get("token",""),"FHKST03010100"),
+                                    params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":r["code"],
+                                            "FID_INPUT_DATE_1":start2,"FID_INPUT_DATE_2":end2,
+                                            "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},timeout=10)
+                                vols2=[float(d.get("acml_vol",0) or 0) for d in rv.json().get("output2",[]) if d.get("stck_clpr")]
+                                vols2.reverse()
+                            except: vols2=[]
+                        render_7day_table(closes, vols2, dates_raw2, rsi_s, macd_s, is_foreign=r.get("is_foreign",False), exc_rate=get_usd_krw() if r.get("is_foreign") else 0)
+                        # 뉴스 — 나스닥은 영문 뉴스, 국내는 한글 뉴스
+                        if r.get("is_foreign"):
+                            news_list = get_foreign_news(r["name"])
+                        else:
+                            news_list = get_domestic_news(r["name"])
                         if news_list:
                             st.markdown("**📰 최신 뉴스**")
                             for nw in news_list:
@@ -1386,13 +1749,6 @@ with tab4:
         "TSLA":"TSLA","AAPL":"AAPL","MSFT":"MSFT","AMZN":"AMZN","META":"META",
     }
 
-    @st.cache_data(ttl=3600, show_spinner=False)
-    def get_usd_krw():
-        try:
-            return float(yf.Ticker("USDKRW=X").history(period="1d")['Close'].iloc[-1])
-        except:
-            return 1380.0
-
     @st.cache_data(ttl=1800, show_spinner=False)
     def get_foreign_data(ticker):
         try:
@@ -1408,17 +1764,6 @@ with tab4:
             return df, info
         except:
             return None, None
-
-    @st.cache_data(ttl=1800, show_spinner=False)
-    def get_foreign_news(company_name):
-        try:
-            url = f"https://news.google.com/rss/search?q={urllib.parse.quote(company_name+' stock')}&hl=en&gl=US&ceid=US:en"
-            res = requests.get(url, timeout=5)
-            root = ET.fromstring(res.text)
-            return [{"title": i.find('title').text, "link": i.find('link').text}
-                    for i in root.findall('.//item')[:5]]
-        except:
-            return []
 
     def calc_rsi(prices, period=14):
         s = pd.Series(prices)
