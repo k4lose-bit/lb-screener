@@ -216,8 +216,43 @@ def render_domestic_chart(code, name, closes, APP_KEY, APP_SECRET, token, n=120,
     from plotly.subplots import make_subplots
 
     # ── 데이터 준비 ──────────────────────────────────────
-    # closes에서 유효한 값만 사용 (0 제거)
-    valid_closes = [c for c in closes if c and c > 0]
+    if not token:
+        # 나스닥: yfinance에서 날짜+데이터 함께 가져오기
+        try:
+            import yfinance as yf
+            hist = yf.Ticker(code).history(period="6mo")
+            if hist.empty or len(hist) < 26:
+                st.warning("차트 데이터가 부족합니다.")
+                return pd.Series(), pd.Series(), pd.Series(), []
+            valid_closes = hist['Close'].astype(float).tolist()
+            dates_raw = [d.strftime("%Y%m%d") for d in hist.index]
+        except:
+            st.warning("데이터를 가져오지 못했습니다.")
+            return pd.Series(), pd.Series(), pd.Series(), []
+    else:
+        # 국내: KIS API에서 날짜+종가 함께 가져오기
+        try:
+            end   = datetime.today().strftime("%Y%m%d")
+            start = (datetime.today()-timedelta(days=240)).strftime("%Y%m%d")
+            r2 = requests.get(
+                f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+                headers=kis_headers(APP_KEY, APP_SECRET, token, "FHKST03010100"),
+                params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":code,
+                        "FID_INPUT_DATE_1":start,"FID_INPUT_DATE_2":end,
+                        "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},timeout=10)
+            items = r2.json().get("output2",[])
+            items = [d for d in items if d.get("stck_clpr") and float(d.get("stck_clpr",0))>0]
+            if len(items) < 26:
+                st.warning("차트 데이터가 부족합니다.")
+                return pd.Series(), pd.Series(), pd.Series(), []
+            items.reverse()
+            valid_closes = [float(d["stck_clpr"]) for d in items]
+            dates_raw    = [d["stck_bsop_date"] for d in items]
+        except:
+            # KIS 실패 시 전달받은 closes 사용
+            valid_closes = [c for c in closes if c and c > 0]
+            dates_raw = []
+
     n = min(n, len(valid_closes))
     if n < 26:
         st.warning("차트를 그리기에 데이터가 부족합니다.")
@@ -247,81 +282,168 @@ def render_domestic_chart(code, name, closes, APP_KEY, APP_SECRET, token, n=120,
     bb_mid_n = bb_mid.tolist()[-n:]
     bb_low_n = bb_low.tolist()[-n:]
 
-    # ── 날짜 가져오기 ──────────────────────────────────
-    dates_raw = []
-    try:
-        if token:
-            end   = datetime.today().strftime("%Y%m%d")
-            start = (datetime.today()-timedelta(days=n+60)).strftime("%Y%m%d")
-            r2 = requests.get(
-                f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-                headers=kis_headers(APP_KEY, APP_SECRET, token, "FHKST03010100"),
-                params={"FID_COND_MRKT_DIV_CODE":"J","FID_INPUT_ISCD":code,
-                        "FID_INPUT_DATE_1":start,"FID_INPUT_DATE_2":end,
-                        "FID_PERIOD_DIV_CODE":"D","FID_ORG_ADJ_PRC":"0"},timeout=7)
-            items2 = r2.json().get("output2",[])
-            dates_raw = [d.get("stck_bsop_date","") for d in items2 if d.get("stck_clpr")]
-            dates_raw.reverse()
-        else:
-            import yfinance as yf
-            hist = yf.Ticker(code).history(period="6mo")
-            if not hist.empty:
-                dates_raw = [d.strftime("%Y%m%d") for d in hist.index]
-    except: pass
+    # ── x축 날짜 레이블 생성 ────────────────────────────
+    x_axis = list(range(n))  # x축은 숫자 인덱스
 
-    # ── x축 날짜 MM.DD 변환 ────────────────────────────
     if len(dates_raw) >= n:
         d_list = dates_raw[-n:]
-        x_axis = []
+        date_labels = []
         for ds in d_list:
             ds = str(ds)
             if len(ds) == 8:
-                x_axis.append(f"{ds[4:6]}.{ds[6:]}")
+                date_labels.append(f"{ds[4:6]}.{ds[6:]}")
             else:
-                x_axis.append(str(ds)[:10][5:].replace('-','.'))
+                date_labels.append(str(ds)[:10][5:].replace('-','.'))
     else:
-        x_axis = [f"D-{n-i}" for i in range(n)]
+        date_labels = [f"D-{n-1-i}" for i in range(n)]
 
-    # 15일 간격 tick
-    tick_vals = [x_axis[i] for i in range(0, n, 15) if i < len(x_axis)]
+    # 15일 간격 tick — 숫자 인덱스와 날짜 레이블 분리
+    tick_indices = list(range(0, n, 15))
+    tick_vals  = tick_indices
+    tick_texts = [date_labels[i] for i in tick_indices if i < len(date_labels)]
+
     xaxis_cfg = dict(
-        tickmode="array", tickvals=tick_vals, ticktext=tick_vals,
-        tickangle=-30, showspikes=True, spikemode="across",
+        tickmode="array",
+        tickvals=tick_vals,
+        ticktext=tick_texts,
+        tickangle=-30,
+        showspikes=True, spikemode="across",
         spikesnap="cursor", spikecolor="#888888",
         spikethickness=1, spikedash="dot"
     )
 
-    # ── 차트 그리기 ────────────────────────────────────
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True,
-                        row_heights=[0.45,0.2,0.2,0.15],
-                        vertical_spacing=0.03,
-                        subplot_titles=[f"{name} 주가 + 볼린저밴드","RSI(14)","MACD",""])
+    # ── 차트 그리기 (3단: 주가+BB / RSI / MACD) ──────────
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        row_heights=[0.55, 0.22, 0.23],
+        vertical_spacing=0.04,
+        subplot_titles=[f"{name} 주가 + 볼린저밴드", "RSI (14)", "MACD"]
+    )
 
-    fig.add_trace(go.Scatter(x=x_axis,y=c_n,line=dict(color="#1565C0",width=2),name="종가"),row=1,col=1)
-    fig.add_trace(go.Scatter(x=x_axis,y=bb_up_n,line=dict(color="#E24B4A",width=1,dash="dash"),name="BB상단"),row=1,col=1)
-    fig.add_trace(go.Scatter(x=x_axis,y=bb_mid_n,line=dict(color="#F57F17",width=1),name="BB중간"),row=1,col=1)
-    fig.add_trace(go.Scatter(x=x_axis,y=bb_low_n,line=dict(color="#2E7D32",width=1,dash="dash"),name="BB하단"),row=1,col=1)
+    # ── Row1: 주가 + 볼린저밴드 ──────────────────────────
+    fig.add_trace(go.Scatter(
+        x=x_axis, y=c_n,
+        line=dict(color="#1565C0", width=2.5),
+        name="종가",
+        customdata=date_labels,
+        hovertemplate="%{customdata}<br>종가: %{y:,.3f}<extra></extra>"
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=x_axis, y=bb_up_n,
+        line=dict(color="#E24B4A", width=1.2, dash="dash"),
+        name="BB상단",
+        hovertemplate="BB상단: %{y:,.3f}<extra></extra>"
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=x_axis, y=bb_mid_n,
+        line=dict(color="#F57F17", width=1.2),
+        name="25일이평",
+        hovertemplate="25일이평: %{y:,.3f}<extra></extra>"
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=x_axis, y=bb_low_n,
+        line=dict(color="#2E7D32", width=1.2, dash="dash"),
+        fill="tonexty", fillcolor="rgba(46,125,50,0.05)",
+        name="BB하단",
+        hovertemplate="BB하단: %{y:,.3f}<extra></extra>"
+    ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=x_axis,y=rsi_n,line=dict(color="#6A1B9A",width=1.5),name="RSI"),row=2,col=1)
-    fig.add_hline(y=70,line_dash="dash",line_color="#E24B4A",row=2,col=1)
-    fig.add_hline(y=30,line_dash="dash",line_color="#2E7D32",row=2,col=1)
+    # 범례 주석
+    fig.add_annotation(x=1.01, y=0.97, xref="paper", yref="paper",
+        text="<b style='color:#1565C0'>─</b> 종가<br>"
+             "<b style='color:#E24B4A'>--</b> BB상단<br>"
+             "<b style='color:#F57F17'>─</b> 25일이평<br>"
+             "<b style='color:#2E7D32'>--</b> BB하단",
+        showarrow=False, align="left", font=dict(size=11),
+        bgcolor="rgba(255,255,255,0.85)", bordercolor="#DDD", borderwidth=1)
 
-    hcolors = ["#E24B4A" if v<0 else "#2E7D32" for v in hist_n]
-    fig.add_trace(go.Bar(x=x_axis,y=hist_n,marker_color=hcolors,name="히스토"),row=3,col=1)
-    fig.add_trace(go.Scatter(x=x_axis,y=macd_n,line=dict(color="#1565C0",width=1.5),name="MACD"),row=3,col=1)
-    fig.add_trace(go.Scatter(x=x_axis,y=sig_n,line=dict(color="#F57F17",width=1.5),name="시그널"),row=3,col=1)
+    # ── Row2: RSI ────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=x_axis, y=rsi_n,
+        line=dict(color="#6A1B9A", width=2),
+        name="RSI",
+        customdata=date_labels,
+        hovertemplate="%{customdata}<br>RSI: %{y:.3f}<extra></extra>"
+    ), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="#E24B4A",
+                  annotation_text="과매수(70)", annotation_position="right",
+                  annotation_font_size=10, row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="#2E7D32",
+                  annotation_text="과매도(30)", annotation_position="right",
+                  annotation_font_size=10, row=2, col=1)
+    fig.add_hrect(y0=30, y1=70, fillcolor="rgba(106,27,154,0.04)",
+                  layer="below", line_width=0, row=2, col=1)
+
+    # ── Row3: MACD ───────────────────────────────────────
+    hcolors = ["#E24B4A" if v < 0 else "#2E7D32" for v in hist_n]
+    fig.add_trace(go.Bar(
+        x=x_axis, y=hist_n, marker_color=hcolors,
+        name="히스토그램",
+        customdata=date_labels,
+        hovertemplate="%{customdata}<br>히스토: %{y:.3f}<extra></extra>"
+    ), row=3, col=1)
+    fig.add_trace(go.Scatter(
+        x=x_axis, y=macd_n,
+        line=dict(color="#1565C0", width=1.8),
+        name="MACD",
+        customdata=date_labels,
+        hovertemplate="%{customdata}<br>MACD: %{y:.3f}<extra></extra>"
+    ), row=3, col=1)
+    fig.add_trace(go.Scatter(
+        x=x_axis, y=sig_n,
+        line=dict(color="#F57F17", width=1.8),
+        name="시그널",
+        customdata=date_labels,
+        hovertemplate="%{customdata}<br>시그널: %{y:.3f}<extra></extra>"
+    ), row=3, col=1)
+    fig.add_annotation(x=1.01, y=0.08, xref="paper", yref="paper",
+        text="<b style='color:#1565C0'>─</b> MACD<br>"
+             "<b style='color:#F57F17'>─</b> 시그널<br>"
+             "<b style='color:#2E7D32'>■</b> 양수<br>"
+             "<b style='color:#E24B4A'>■</b> 음수",
+        showarrow=False, align="left", font=dict(size=11),
+        bgcolor="rgba(255,255,255,0.85)", bordercolor="#DDD", borderwidth=1)
+
+    # spike 3행 동시 연결을 위한 dummy trace
+    fig.add_trace(go.Scatter(
+        x=x_axis, y=[None]*n,
+        showlegend=False, hoverinfo="skip",
+        line=dict(width=0), mode="lines"
+    ), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=x_axis, y=[None]*n,
+        showlegend=False, hoverinfo="skip",
+        line=dict(width=0), mode="lines"
+    ), row=3, col=1)
+
+    spike_cfg = dict(
+        showspikes=True, spikemode="across", spikethickness=1,
+        spikedash="dot", spikecolor="#AAAAAA", spikesnap="cursor",
+        matches="x"
+    )
 
     fig.update_layout(
-        height=580, showlegend=False,
+        height=600, showlegend=False,
         paper_bgcolor="white", plot_bgcolor="#F8F9FA",
-        margin=dict(l=10,r=10,t=30,b=50),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="white", font_size=12, bordercolor="#DDDDDD"),
-        xaxis =dict(**xaxis_cfg, showticklabels=False),
-        xaxis2=dict(**xaxis_cfg, showticklabels=False),
-        xaxis3=dict(**xaxis_cfg, showticklabels=False),
-        xaxis4=dict(**xaxis_cfg, showticklabels=True),
+        margin=dict(l=10, r=110, t=30, b=60),
+        hovermode="x",
+        hoverlabel=dict(bgcolor="white", font_size=12, bordercolor="#DDD"),
+        xaxis =dict(**spike_cfg),
+        xaxis2=dict(**spike_cfg),
+        xaxis3=dict(**spike_cfg),
     )
+
+    # tick 설정
+    fig.update_xaxes(
+        tickmode="array", tickvals=tick_vals, ticktext=tick_texts,
+        tickangle=-30, showticklabels=False,
+    )
+    fig.update_xaxes(showticklabels=True, row=3, col=1)
+
+    # y축 스타일
+    fig.update_yaxes(gridcolor="#EEEEEE", row=1, col=1)
+    fig.update_yaxes(gridcolor="#EEEEEE", range=[0,100], row=2, col=1)
+    fig.update_yaxes(gridcolor="#EEEEEE", row=3, col=1)
 
     # ── 메트릭 ─────────────────────────────────────────
     cur_rsi   = round(float(rsi_n[-1]),1)
@@ -417,23 +539,28 @@ def render_7day_table(closes, volumes, dates_raw, rsi_series, macd_series, is_fo
                 price_str = f"{int(p):,}원"
                 change_str = f"{int(p-po):+,}원"
 
+            # 등락률 색상 — + 빨강, - 파랑
+            chg_color = "#E24B4A" if dc > 0 else "#1565C0"
+
             # RSI 신호 — 30↓ 초록, 70↑ 빨강
             if r_val >= 70:
-                rsi_signal = f'<span style="color:#E24B4A;font-weight:700">{r_val}</span>&nbsp;<span style="color:#E24B4A;font-size:1.4rem;line-height:1">●</span>'
+                rsi_signal = f'<span style="color:#E24B4A;font-weight:700">{r_val}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
             elif r_val <= 30:
-                rsi_signal = f'<span style="color:#2E7D32;font-weight:700">{r_val}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
+                rsi_signal = f'<span style="color:#2E7D32;font-weight:700">{r_val}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
             else:
                 rsi_signal = f'<span style="color:var(--text-main)">{r_val}</span>'
 
             # MACD 신호 — 양수 초록, 음수 빨강
             if m_val > 0:
-                macd_signal = f'<span style="color:#2E7D32;font-weight:700">{m_val}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
+                macd_signal = f'<span style="color:#2E7D32;font-weight:700">{m_val}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
             else:
-                macd_signal = f'<span style="color:#E24B4A;font-weight:700">{m_val}</span>&nbsp;<span style="color:#E24B4A;font-size:1.4rem;line-height:1">●</span>'
+                macd_signal = f'<span style="color:#E24B4A;font-weight:700">{m_val}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
 
-            # 거래량 — 평균 1.5배↑ 초록
+            # 거래량 — 평균 1.5배↑ 밝은초록, 평균 0.5배↓ 빨강
             if avg_vol > 0 and v >= avg_vol * 1.5:
-                vol_signal = f'<span style="font-weight:600">{int(v):,}</span>&nbsp;<span style="color:#2E7D32;font-size:1.4rem;line-height:1">●</span>'
+                vol_signal = f'<span style="font-weight:600">{int(v):,}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
+            elif avg_vol > 0 and v <= avg_vol * 0.5:
+                vol_signal = f'<span style="font-weight:600">{int(v):,}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
             else:
                 vol_signal = f"{int(v):,}"
 
@@ -1938,42 +2065,74 @@ padding:16px 24px;margin-bottom:20px;color:white">
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
 
-            n   = min(60, len(closes))
+            n   = min(120, len(closes))
             c60 = closes[-n:]; d60 = dates[-n:]
             v60 = volumes[-n:]
+            x60 = list(range(n))
+
+            # 볼린저밴드 계산
+            s_f = pd.Series(closes)
+            bb_up_f  = (s_f.rolling(20).mean() + 2*s_f.rolling(20).std()).tolist()[-n:]
+            bb_mid_f = s_f.rolling(20).mean().tolist()[-n:]
+            bb_low_f = (s_f.rolling(20).mean() - 2*s_f.rolling(20).std()).tolist()[-n:]
+            hist_f   = [m-s for m,s in zip(macd_line.tolist()[-n:], sig_line.tolist()[-n:])]
+            hcolors_f = ["#E24B4A" if v<0 else "#2E7D32" for v in hist_f]
 
             fig = make_subplots(
-                rows=4, cols=1, shared_xaxes=True,
-                row_heights=[0.45,0.2,0.2,0.15],
-                vertical_spacing=0.03,
-                subplot_titles=["주가 + 볼린저밴드","RSI(14)","MACD","거래량"]
+                rows=3, cols=1, shared_xaxes=True,
+                row_heights=[0.55,0.22,0.23],
+                vertical_spacing=0.04,
+                subplot_titles=[f"{f_display_name} 주가 + 볼린저밴드","RSI (14)","MACD"]
             )
 
-            # 주가 캔들 스타일 (단순 라인 + 볼린저)
-            fig.add_trace(go.Scatter(x=d60,y=c60,line=dict(color="#1565C0",width=2),name="종가"),row=1,col=1)
-            fig.add_trace(go.Scatter(x=d60,y=bb_up.tolist()[-n:],line=dict(color="#E24B4A",width=1,dash="dash"),name="BB상단"),row=1,col=1)
-            fig.add_trace(go.Scatter(x=d60,y=bb_mid.tolist()[-n:],line=dict(color="#F57F17",width=1),name="BB중간"),row=1,col=1)
-            fig.add_trace(go.Scatter(x=d60,y=bb_low.tolist()[-n:],line=dict(color="#2E7D32",width=1,dash="dash"),name="BB하단"),row=1,col=1)
+            fig.add_trace(go.Scatter(x=x60,y=c60,line=dict(color="#1565C0",width=2.5),name="종가",customdata=d60,hovertemplate="%{customdata}<br>종가: $%{y:,.3f}<extra></extra>"),row=1,col=1)
+            fig.add_trace(go.Scatter(x=x60,y=bb_up_f,line=dict(color="#E24B4A",width=1.2,dash="dash"),name="BB상단",hovertemplate="BB상단: $%{y:,.3f}<extra></extra>"),row=1,col=1)
+            fig.add_trace(go.Scatter(x=x60,y=bb_mid_f,line=dict(color="#F57F17",width=1.2),name="25일이평",hovertemplate="25일이평: $%{y:,.3f}<extra></extra>"),row=1,col=1)
+            fig.add_trace(go.Scatter(x=x60,y=bb_low_f,line=dict(color="#2E7D32",width=1.2,dash="dash"),fill="tonexty",fillcolor="rgba(46,125,50,0.05)",name="BB하단",hovertemplate="BB하단: $%{y:,.3f}<extra></extra>"),row=1,col=1)
 
-            # RSI
-            rsi_list = rsi_series.tolist()[-n:]
-            fig.add_trace(go.Scatter(x=d60,y=rsi_list,line=dict(color="#6A1B9A",width=1.5),name="RSI"),row=2,col=1)
-            fig.add_hline(y=70,line_dash="dash",line_color="#E24B4A",row=2,col=1)
-            fig.add_hline(y=30,line_dash="dash",line_color="#2E7D32",row=2,col=1)
+            fig.add_annotation(x=1.01,y=0.97,xref="paper",yref="paper",
+                text="<b style='color:#1565C0'>─</b> 종가<br><b style='color:#E24B4A'>--</b> BB상단<br><b style='color:#F57F17'>─</b> 25일이평<br><b style='color:#2E7D32'>--</b> BB하단",
+                showarrow=False,align="left",font=dict(size=11),
+                bgcolor="rgba(255,255,255,0.85)",bordercolor="#DDD",borderwidth=1)
 
-            # MACD
-            macd_n = macd_line.tolist()[-n:]; sig_n = sig_line.tolist()[-n:]
-            hist_n = [m-s for m,s in zip(macd_n,sig_n)]
-            hcolors = ["#E24B4A" if v<0 else "#2E7D32" for v in hist_n]
-            fig.add_trace(go.Bar(x=d60,y=hist_n,marker_color=hcolors,name="히스토"),row=3,col=1)
-            fig.add_trace(go.Scatter(x=d60,y=macd_n,line=dict(color="#1565C0",width=1.5),name="MACD"),row=3,col=1)
-            fig.add_trace(go.Scatter(x=d60,y=sig_n,line=dict(color="#F57F17",width=1.5),name="시그널"),row=3,col=1)
+            rsi_f = rsi_series.tolist()[-n:]
+            fig.add_trace(go.Scatter(x=x60,y=rsi_f,line=dict(color="#6A1B9A",width=2),name="RSI",customdata=d60,hovertemplate="%{customdata}<br>RSI: %{y:.3f}<extra></extra>"),row=2,col=1)
+            fig.add_hline(y=70,line_dash="dash",line_color="#E24B4A",annotation_text="과매수(70)",annotation_position="right",annotation_font_size=10,row=2,col=1)
+            fig.add_hline(y=30,line_dash="dash",line_color="#2E7D32",annotation_text="과매도(30)",annotation_position="right",annotation_font_size=10,row=2,col=1)
 
-            # 거래량
-            fig.add_trace(go.Bar(x=d60,y=v60,marker_color="#B0BEC5",name="거래량"),row=4,col=1)
+            fig.add_trace(go.Bar(x=x60,y=hist_f,marker_color=hcolors_f,name="히스토",customdata=d60,hovertemplate="%{customdata}<br>히스토: %{y:.3f}<extra></extra>"),row=3,col=1)
+            fig.add_trace(go.Scatter(x=x60,y=macd_line.tolist()[-n:],line=dict(color="#1565C0",width=1.8),name="MACD",customdata=d60,hovertemplate="%{customdata}<br>MACD: %{y:.3f}<extra></extra>"),row=3,col=1)
+            fig.add_trace(go.Scatter(x=x60,y=sig_line.tolist()[-n:],line=dict(color="#F57F17",width=1.8),name="시그널",customdata=d60,hovertemplate="%{customdata}<br>시그널: %{y:.3f}<extra></extra>"),row=3,col=1)
+            fig.add_annotation(x=1.01,y=0.08,xref="paper",yref="paper",
+                text="<b style='color:#1565C0'>─</b> MACD<br><b style='color:#F57F17'>─</b> 시그널<br><b style='color:#2E7D32'>■</b> 양수<br><b style='color:#E24B4A'>■</b> 음수",
+                showarrow=False,align="left",font=dict(size=11),
+                bgcolor="rgba(255,255,255,0.85)",bordercolor="#DDD",borderwidth=1)
 
-            fig.update_layout(height=580,showlegend=False,paper_bgcolor="white",
-                              plot_bgcolor="#F8F9FA",margin=dict(l=10,r=10,t=30,b=10))
+            # x축 날짜 15일 간격
+            f_tick_vals  = list(range(0, n, 15))
+            f_tick_texts = [d60[i] if i < len(d60) else "" for i in f_tick_vals]
+
+            # spike 3행 동시 연결
+            fig.add_trace(go.Scatter(x=x60,y=[None]*n,showlegend=False,hoverinfo="skip",line=dict(width=0),mode="lines"),row=2,col=1)
+            fig.add_trace(go.Scatter(x=x60,y=[None]*n,showlegend=False,hoverinfo="skip",line=dict(width=0),mode="lines"),row=3,col=1)
+
+            f_spike_cfg = dict(
+                showspikes=True, spikemode="across", spikethickness=1,
+                spikedash="dot", spikecolor="#AAAAAA", spikesnap="cursor",
+                matches="x"
+            )
+            fig.update_layout(height=600,showlegend=False,paper_bgcolor="white",
+                              plot_bgcolor="#F8F9FA",margin=dict(l=10,r=110,t=30,b=60),
+                              hovermode="x",
+                              hoverlabel=dict(bgcolor="white",font_size=12,bordercolor="#DDD"),
+                              xaxis=dict(**f_spike_cfg),
+                              xaxis2=dict(**f_spike_cfg),
+                              xaxis3=dict(**f_spike_cfg))
+            fig.update_xaxes(tickmode="array",tickvals=f_tick_vals,ticktext=f_tick_texts,
+                             tickangle=-30,showticklabels=False)
+            fig.update_xaxes(showticklabels=True,row=3,col=1)
+            fig.update_yaxes(gridcolor="#EEEEEE")
+            fig.update_yaxes(range=[0,100],row=2,col=1)
             st.plotly_chart(fig, use_container_width=True, key=f"foreign_{f_ticker}")
 
             # ── 최근 7거래일 표 ──────────────────────
