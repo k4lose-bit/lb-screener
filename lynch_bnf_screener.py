@@ -542,25 +542,25 @@ def render_7day_table(closes, volumes, dates_raw, rsi_series, macd_series, is_fo
             # 등락률 색상 — + 빨강, - 파랑
             chg_color = "#E24B4A" if dc > 0 else "#1565C0"
 
-            # RSI 신호 — 30↓ 초록, 70↑ 빨강
+            # RSI 신호
             if r_val >= 70:
                 rsi_signal = f'<span style="color:#E24B4A;font-weight:700">{r_val}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
             elif r_val <= 30:
-                rsi_signal = f'<span style="color:#2E7D32;font-weight:700">{r_val}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
+                rsi_signal = f'<span style="color:#1565C0;font-weight:700">{r_val}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
             else:
                 rsi_signal = f'<span style="color:var(--text-main)">{r_val}</span>'
 
-            # MACD 신호 — 양수 초록, 음수 빨강
+            # MACD 신호
             if m_val > 0:
-                macd_signal = f'<span style="color:#2E7D32;font-weight:700">{m_val}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
+                macd_signal = f'<span style="color:#1565C0;font-weight:700">{m_val}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
             else:
                 macd_signal = f'<span style="color:#E24B4A;font-weight:700">{m_val}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
 
-            # 거래량 — 평균 1.5배↑ 밝은초록, 평균 0.5배↓ 빨강
+            # 거래량
             if avg_vol > 0 and v >= avg_vol * 1.5:
-                vol_signal = f'<span style="font-weight:600">{int(v):,}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
+                vol_signal = f'<span style="color:#1565C0;font-weight:700">{int(v):,}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
             elif avg_vol > 0 and v <= avg_vol * 0.5:
-                vol_signal = f'<span style="font-weight:600">{int(v):,}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
+                vol_signal = f'<span style="color:#E24B4A;font-weight:700">{int(v):,}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
             else:
                 vol_signal = f"{int(v):,}"
 
@@ -2148,18 +2148,23 @@ padding:16px 24px;margin-bottom:20px;color:white">
                     m_val = round(macd_line.tolist()[i], 3)
 
                     if r_val >= 70:
-                        rsi_signal = f'<span style="color:#E24B4A;font-weight:700">{r_val}</span> <span style="color:#E24B4A">●</span>'
+                        rsi_signal = f'<span style="color:#E24B4A;font-weight:700">{r_val}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
                     elif r_val <= 30:
-                        rsi_signal = f'<span style="color:#2E7D32;font-weight:700">{r_val}</span> <span style="color:#2E7D32">●</span>'
+                        rsi_signal = f'<span style="color:#1565C0;font-weight:700">{r_val}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
                     else:
-                        rsi_signal = f'<span style="color:var(--text-sub)">{r_val}</span>'
+                        rsi_signal = f'<span style="color:var(--text-main)">{r_val}</span>'
 
                     if m_val > 0:
-                        macd_signal = f'<span style="color:#E24B4A;font-weight:700">{m_val}</span> <span style="color:#2E7D32">●</span>'
+                        macd_signal = f'<span style="color:#1565C0;font-weight:700">{m_val}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
                     else:
-                        macd_signal = f'<span style="color:#1565C0;font-weight:700">{m_val}</span> <span style="color:#E24B4A">●</span>'
+                        macd_signal = f'<span style="color:#E24B4A;font-weight:700">{m_val}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
 
-                    vol_signal = f'<span style="font-weight:600">{int(v):,}</span> <span style="color:#2E7D32">●</span>' if v >= avg_vol_f*1.5 else f'{int(v):,}'
+                    if v >= avg_vol_f * 1.5:
+                        vol_signal = f'<span style="color:#1565C0;font-weight:700">{int(v):,}</span>&nbsp;<span style="color:#00C853;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
+                    elif avg_vol_f > 0 and v <= avg_vol_f * 0.5:
+                        vol_signal = f'<span style="color:#E24B4A;font-weight:700">{int(v):,}</span>&nbsp;<span style="color:#E24B4A;font-size:2rem;line-height:1;vertical-align:middle">●</span>'
+                    else:
+                        vol_signal = f"{int(v):,}"
 
                     rows_html += (
                         f'<tr style="border-bottom:1px solid #F0F0F0;font-size:1rem">'
