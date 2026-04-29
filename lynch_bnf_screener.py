@@ -850,15 +850,12 @@ except:
     ant_key = ""
 
 try:
-    # 여러 방법으로 시도
     if "AI_PASSWORD" in st.secrets:
         ai_password = str(st.secrets["AI_PASSWORD"])
     else:
         ai_password = ""
 except:
     ai_password = ""
-
-st.sidebar.caption(f"DEBUG pw: [{ai_password}] len={len(ai_password)}, keys={list(st.secrets.keys())}")
 
 # ── API 키 ──────────────────────────────────────────────
 try:
