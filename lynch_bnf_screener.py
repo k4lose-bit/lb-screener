@@ -845,9 +845,20 @@ with st.sidebar:
 
 # ── Anthropic API 키 (secrets에서만 읽기, 화면 노출 없음) ──
 try:
-    ant_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    ant_key = st.secrets["ANTHROPIC_API_KEY"]
 except:
     ant_key = ""
+
+try:
+    # 여러 방법으로 시도
+    if "AI_PASSWORD" in st.secrets:
+        ai_password = str(st.secrets["AI_PASSWORD"])
+    else:
+        ai_password = ""
+except:
+    ai_password = ""
+
+st.sidebar.caption(f"DEBUG pw: [{ai_password}] len={len(ai_password)}, keys={list(st.secrets.keys())}")
 
 # ── API 키 ──────────────────────────────────────────────
 try:
@@ -1239,7 +1250,7 @@ with tab1:
 
             # 각 파트를 별도 변수로 분리
             theme_part = '<div style="margin-top:5px">' + theme_tags + '</div>' if theme_tags else ''
-            reason_part = '<div style="background:var(--chip-bg);border-radius:10px;padding:10px 14px;font-size:.85rem;color:#333;line-height:1.7;border-left:3px solid #1565C0;min-width:200px;max-width:340px;align-self:center">💡 ' + reason_text + '</div>' if reason_text else '<div style="min-width:10px"></div>'
+            reason_part = '<div style="background:var(--chip-bg);border-radius:10px;padding:10px 14px;font-size:.85rem;color:var(--text-sub);line-height:1.7;border-left:3px solid #1565C0;min-width:200px;max-width:340px;align-self:center">💡 ' + reason_text + '</div>' if reason_text else '<div style="min-width:10px"></div>'
             # 통화 표시 — 나스닥은 $, 국내는 원
             is_foreign = r.get("is_foreign", False)
             if is_foreign:
@@ -1359,17 +1370,26 @@ with tab1:
 전문적이되 친근한 어조, 800자 내외.
 마지막: ※ 본 분석은 투자 참고용이며 투자 판단과 책임은 본인에게 있습니다."""
 
+
             if st.button("🤖 AI 분석 리포트 생성", use_container_width=True, key="ai_btn"):
-                import anthropic
-                client = anthropic.Anthropic(api_key=ant_key)
-                ph = st.empty(); txt = ""
-                with client.messages.stream(
-                    model="claude-opus-4-5", max_tokens=1500,
-                    messages=[{"role":"user","content":prompt}]
-                ) as s:
-                    for t in s.text_stream:
-                        txt += t; ph.markdown(txt + "▌")
-                ph.markdown(txt)
+                st.session_state["show_ai_pw_lb"] = True
+            if st.session_state.get("show_ai_pw_lb"):
+                pw_input = st.text_input("🔒 비밀번호 입력", type="password", key="ai_pw_lb")
+                if pw_input:
+                    if pw_input == ai_password:
+                        import anthropic
+                        client = anthropic.Anthropic(api_key=ant_key)
+                        ph = st.empty(); txt = ""
+                        with client.messages.stream(
+                            model="claude-opus-4-5", max_tokens=1500,
+                            messages=[{"role":"user","content":prompt}]
+                        ) as s:
+                            for t in s.text_stream:
+                                txt += t; ph.markdown(txt+"▌")
+                        ph.markdown(txt)
+                        st.session_state["show_ai_pw_lb"] = False
+                    else:
+                        st.error("❌ 비밀번호가 틀렸습니다.")
             st.markdown('</div>', unsafe_allow_html=True)
 
     elif not run:
@@ -1522,7 +1542,7 @@ with tab2:
                 '<span style="font-size:.75rem;color:var(--text-light);margin-left:6px">' + r["code"] + '</span>'
                 '<span style="font-size:.78rem;color:var(--text-muted);margin-left:10px">현재가 ' + f'{int(r["current"]):,}' + '원</span>'
                 '</div>'
-                '<div style="margin-top:5px;font-size:.82rem;color:#444;line-height:1.6;'
+                '<div style="margin-top:5px;font-size:.82rem;color:var(--text-sub);line-height:1.6;'
                 'background:var(--chip-bg);border-radius:8px;padding:7px 12px;border-left:3px solid #1565C0">'
                 '💡 ' + reason_text +
                 '</div>'
@@ -1777,7 +1797,7 @@ with tab3:
         st.markdown(
             '<div style="background:var(--chip-bg);border-radius:12px;padding:16px 20px;'
             'border-left:4px solid #1565C0;margin-bottom:16px;font-size:.9rem;'
-            'color:#333;line-height:1.8">💡 ' + reason_html + '</div>',
+            'color:var(--text-sub);line-height:1.8">💡 ' + reason_html + '</div>',
             unsafe_allow_html=True
         )
 
@@ -1839,16 +1859,24 @@ with tab3:
 마지막: ※ 투자 판단과 책임은 본인에게 있습니다."""
 
             if st.button("🤖 AI 심층 분석", use_container_width=True, key="single_ai"):
-                import anthropic
-                client = anthropic.Anthropic(api_key=ant_key)
-                ph = st.empty(); txt = ""
-                with client.messages.stream(
-                    model="claude-opus-4-5", max_tokens=1200,
-                    messages=[{"role":"user","content":single_prompt}]
-                ) as s:
-                    for t in s.text_stream:
-                        txt += t; ph.markdown(txt+"▌")
-                ph.markdown(txt)
+                st.session_state["show_ai_pw_single"] = True
+            if st.session_state.get("show_ai_pw_single"):
+                pw_input2 = st.text_input("🔒 비밀번호 입력", type="password", key="ai_pw_single")
+                if pw_input2:
+                    if pw_input2 == ai_password:
+                        import anthropic
+                        client = anthropic.Anthropic(api_key=ant_key)
+                        ph = st.empty(); txt = ""
+                        with client.messages.stream(
+                            model="claude-opus-4-5", max_tokens=1200,
+                            messages=[{"role":"user","content":single_prompt}]
+                        ) as s:
+                            for t in s.text_stream:
+                                txt += t; ph.markdown(txt+"▌")
+                        ph.markdown(txt)
+                        st.session_state["show_ai_pw_single"] = False
+                    else:
+                        st.error("❌ 비밀번호가 틀렸습니다.")
             st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -2056,7 +2084,7 @@ padding:16px 24px;margin-bottom:20px;color:white">
             reason = foreign_reason(f_ticker, current, prev_c, rsi_val, bb_gap, info_f)
             st.markdown(
                 '<div style="background:var(--chip-bg);border-radius:12px;padding:14px 18px;'
-                'border-left:4px solid #1a237e;margin:12px 0;font-size:.9rem;color:#333;line-height:1.8">'
+                'border-left:4px solid #1a237e;margin:12px 0;font-size:.9rem;color:var(--text-sub);line-height:1.8">'
                 '💡 ' + reason + '</div>',
                 unsafe_allow_html=True
             )
@@ -2121,7 +2149,7 @@ padding:16px 24px;margin-bottom:20px;color:white">
                 spikedash="dot", spikecolor="#AAAAAA", spikesnap="cursor",
                 matches="x"
             )
-            fig.update_layout(height=600,showlegend=False,paper_bgcolor="white",
+            fig.update_layout(height=600,showlegend=False,dragmode=False,paper_bgcolor="white",
                               plot_bgcolor="#F8F9FA",margin=dict(l=10,r=110,t=30,b=60),
                               hovermode="x",
                               hoverlabel=dict(bgcolor="white",font_size=12,bordercolor="#DDD"),
@@ -2227,16 +2255,24 @@ padding:16px 24px;margin-bottom:20px;color:white">
 마지막: ※ 투자 판단과 책임은 본인에게 있습니다."""
 
                 if st.button("🤖 AI 심층 분석", use_container_width=True, key="foreign_ai"):
-                    import anthropic
-                    client = anthropic.Anthropic(api_key=ant_key)
-                    ph = st.empty(); txt = ""
-                    with client.messages.stream(
-                        model="claude-opus-4-5", max_tokens=1200,
-                        messages=[{"role":"user","content":f_prompt}]
-                    ) as s:
-                        for t in s.text_stream:
-                            txt += t; ph.markdown(txt+"▌")
-                    ph.markdown(txt)
+                    st.session_state["show_ai_pw_foreign"] = True
+                if st.session_state.get("show_ai_pw_foreign"):
+                    pw_input3 = st.text_input("🔒 비밀번호 입력", type="password", key="ai_pw_foreign")
+                    if pw_input3:
+                        if pw_input3 == ai_password:
+                            import anthropic
+                            client = anthropic.Anthropic(api_key=ant_key)
+                            ph = st.empty(); txt = ""
+                            with client.messages.stream(
+                                model="claude-opus-4-5", max_tokens=1200,
+                                messages=[{"role":"user","content":f_prompt}]
+                            ) as s:
+                                for t in s.text_stream:
+                                    txt += t; ph.markdown(txt+"▌")
+                            ph.markdown(txt)
+                            st.session_state["show_ai_pw_foreign"] = False
+                        else:
+                            st.error("❌ 비밀번호가 틀렸습니다.")
                 st.markdown('</div>', unsafe_allow_html=True)
 
     elif not f_query and not _example_ticker:
