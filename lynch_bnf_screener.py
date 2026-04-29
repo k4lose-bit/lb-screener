@@ -906,20 +906,10 @@ if not KEYS_OK:
     st.stop()
 
 # ── 탭 ──────────────────────────────────────────────────
-tab_theme, tab_search, tab_foreign, tab_lb = st.tabs(["🗂 테마 탐색기", "🔍 종목 검색", "🌏 해외 종목", "📊 LB 스크리너"])
-tab1 = tab_lb
-tab2 = tab_theme
-tab3 = tab_search
-tab4 = tab_foreign
-
-# ════════════════════════════════════════════════════════
-# 탭1: LB 스크리너
-# ════════════════════════════════════════════════════════
-with tab1:
-    # ── Stage 카드 4개 + 지표 해설 ──────────────────────
-    c1,c2,c3,c4 = st.columns(4)
-    with c1:
-        st.markdown(f'''<div class="stage-card stage-lynch">
+# Stage 카드 — 탭 밖에서 항상 표시
+c1,c2,c3,c4 = st.columns(4)
+with c1:
+    st.markdown(f'''<div class="stage-card stage-lynch">
 <div class="stage-label lynch-label">Stage 1 · 피터 린치</div>
 <div class="stage-title">펀더멘털 필터</div>
 <div class="stage-criteria">PEG <b>{peg_max}</b> 이하<br>EPS 성장률 <b>{eps_min}%+</b> 확인<br>6분류 — 고속성장주 우선</div>
@@ -930,9 +920,8 @@ with tab1:
 1.5↓ <b style="color:#F57F17">보유</b> · 1.5↑ <b style="color:#C62828">고평가</b><br>
 <span style="color:var(--text-light);font-size:.72rem">PER이 높아도 성장률이 더 높으면 저평가</span>
 </div></div>''', unsafe_allow_html=True)
-
-    with c2:
-        st.markdown(f'''<div class="stage-card stage-bnf">
+with c2:
+    st.markdown(f'''<div class="stage-card stage-bnf">
 <div class="stage-label bnf-label">Stage 2 · BNF</div>
 <div class="stage-title">타이밍 필터</div>
 <div class="stage-criteria">이격도 <b>{gap_max}%</b> 이하<br>섹터 내 소외 <b>{sector_min}%+</b><br>거래량 급증 확인</div>
@@ -943,9 +932,8 @@ with tab1:
 103↑ <b style="color:#C62828">과열주의</b><br>
 <span style="color:var(--text-light);font-size:.72rem">현재가 ÷ 25일이평 × 100</span>
 </div></div>''', unsafe_allow_html=True)
-
-    with c3:
-        st.markdown(f'''<div class="stage-card stage-score">
+with c3:
+    st.markdown(f'''<div class="stage-card stage-score">
 <div class="stage-label score-label">Stage 3 · 결합</div>
 <div class="stage-title">LB 스코어 산출</div>
 <div class="stage-criteria">린치 품질 <b>×{lynch_w}</b><br>BNF 타이밍 <b>×{bnf_w}</b><br>상위 종목 자동 선별</div>
@@ -956,9 +944,8 @@ with tab1:
 30↑ <b style="color:#F57F17">참고</b> · 30↓ <b style="color:#C62828">미달</b><br>
 <span style="color:var(--text-light);font-size:.72rem">린치×{lynch_w} + BNF×{bnf_w} 결합 점수</span>
 </div></div>''', unsafe_allow_html=True)
-
-    with c4:
-        st.markdown(f'''<div class="stage-card stage-report">
+with c4:
+    st.markdown(f'''<div class="stage-card stage-report">
 <div class="stage-label report-label">Stage 4 · 리포트</div>
 <div class="stage-title">AI 투자 분석</div>
 <div class="stage-criteria">Claude API 종목 해설<br>펀더멘털 + 기술적 분석<br>리스크 요인 자동 진단</div>
@@ -970,9 +957,21 @@ with tab1:
 <span style="color:var(--text-light);font-size:.72rem">린치는 연 25%+ 성장주 선호</span>
 </div></div>''', unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
+st.markdown("<br>", unsafe_allow_html=True)
+
+tab_theme, tab_search, tab_foreign, tab_lb = st.tabs(["🗂 테마 탐색기", "🔍 종목 검색", "🌏 해외 종목", "📊 LB 스크리너"])
+tab1 = tab_lb
+tab2 = tab_theme
+tab3 = tab_search
+tab4 = tab_foreign
+
+# ════════════════════════════════════════════════════════
+# 탭1: LB 스크리너
+# ════════════════════════════════════════════════════════
+with tab1:
 
     run = st.button("▶ 스크리닝 실행", use_container_width=True, key="run_btn")
+
 
     if "results"  not in st.session_state: st.session_state.results  = None
     if "token"    not in st.session_state: st.session_state.token    = ""
@@ -1594,8 +1593,8 @@ with tab2:
         for i, code in enumerate(theme_codes):
             name = get_stock_name(code)
             preview_cols[i%5].markdown(
-                f'<div style="background:var(--bg-card);border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:.82rem;box-shadow:0 1px 4px rgba(0,0,0,.07)">'
-                f'<b>{name}</b><br><span style="color:var(--text-light);font-size:.72rem">{code}</span></div>',
+                f'<div style="background:#E8D5F5;border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:.82rem;box-shadow:0 1px 4px rgba(0,0,0,.07)">'
+                f'<b style="color:#212121">{name}</b><br><span style="color:#555555;font-size:.72rem">{code}</span></div>',
                 unsafe_allow_html=True
             )
         st.info("👆 **테마 종목 LB 분석** 버튼을 눌러 LB 조건 충족 여부를 확인하세요.")
