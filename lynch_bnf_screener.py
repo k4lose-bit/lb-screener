@@ -112,7 +112,7 @@ html,body,[class*="css"]{font-family:'Noto Sans KR',sans-serif!important;}
 .sm-val.green{color:#2E7D32}.sm-val.blue{color:#1565C0}.sm-val.purple{color:#6A1B9A}.sm-val.orange{color:#F57F17;font-size:1.1rem}
 .lb-bar{height:8px;border-radius:4px;background:linear-gradient(90deg,#1565C0,#0097A7);display:inline-block;vertical-align:middle;margin-right:6px}
 .report-box{background:var(--bg-card);border-radius:14px;padding:24px 28px;box-shadow:0 2px 12px var(--shadow);margin-top:16px}
-.theme-stock-row{background:#7B1FA2;border-radius:10px;padding:12px 16px;margin-bottom:8px;box-shadow:0 2px 6px var(--shadow);display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;color:white}
+.theme-stock-row{background:#E8D5F5;border-radius:10px;padding:12px 16px;margin-bottom:8px;box-shadow:0 2px 6px var(--shadow);display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;color:#212121}
 .lb-badge-high{background:var(--tag-bg);color:#2E7D32;border-radius:8px;padding:3px 10px;font-size:.8rem;font-weight:700}
 .lb-badge-mid{background:var(--bg-card2);color:#F57F17;border-radius:8px;padding:3px 10px;font-size:.8rem;font-weight:700}
 .lb-badge-low{background:var(--bg-card2);color:var(--text-light);border-radius:8px;padding:3px 10px;font-size:.8rem;font-weight:700}
@@ -1535,12 +1535,12 @@ with tab2:
                 '<div style="font-size:1.1rem;min-width:24px">' + ok_mark + '</div>'
                 '<div style="flex:1">'
                 '<div>'
-                '<span style="font-weight:700;color:white">' + r["name"] + '</span>'
-                '<span style="font-size:.75rem;color:rgba(255,255,255,0.7);margin-left:6px">' + r["code"] + '</span>'
-                '<span style="font-size:.78rem;color:rgba(255,255,255,0.8);margin-left:10px">현재가 ' + f'{int(r["current"]):,}' + '원</span>'
+                '<span style="font-weight:700;color:#212121">' + r["name"] + '</span>'
+                '<span style="font-size:.75rem;color:#555555;margin-left:6px">' + r["code"] + '</span>'
+                '<span style="font-size:.78rem;color:#444444;margin-left:10px">현재가 ' + f'{int(r["current"]):,}' + '원</span>'
                 '</div>'
-                '<div style="margin-top:5px;font-size:.82rem;color:white;line-height:1.6;'
-                'background:rgba(255,255,255,0.15);border-radius:8px;padding:7px 12px;border-left:3px solid white">'
+                '<div style="margin-top:5px;font-size:.82rem;color:#333333;line-height:1.6;'
+                'background:rgba(123,31,162,0.1);border-radius:8px;padding:7px 12px;border-left:3px solid #7B1FA2">'
                 '💡 ' + reason_text +
                 '</div>'
                 '</div>'
